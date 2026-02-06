@@ -1,0 +1,13 @@
+# Obsidian local workspace (device specific)
+.obsidian/workspace*
+.obsidian/cache
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Trash
+.trash/
+
+# Optional: log files
+*.log
