@@ -9,7 +9,7 @@
 - [ ] [15. 三数之和](https://leetcode.cn/problems/3sum/)
 - [ ] [26. 删除有序数组中的重复项](https://leetcode.cn/problems/remove-duplicates-from-sorted-array/)
 - [ ] [42. 接雨水](https://leetcode.cn/problems/trapping-rain-water/)
-- [ ] [209. 长度最小的子数组](https://leetcode.cn/problems/minimum-size-subarray-sum/)
+- [x] [209. 长度最小的子数组](https://leetcode.cn/problems/minimum-size-subarray-sum/)
 - [ ] [283. 移动零](https://leetcode.cn/problems/move-zeroes/)
 - [ ] [560. 和为 K 的子数组](https://leetcode.cn/problems/subarray-sum-equals-k/)
 - [ ] [713. 乘积小于 K 的子数组](https://leetcode.cn/problems/subarray-product-less-than-k/)
