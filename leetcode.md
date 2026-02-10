@@ -18,7 +18,7 @@
 
 ## 二、哈希表
 
-- [ ] [49. 字母异位词分组](https://leetcode.cn/problems/group-anagrams/)
+- [x] [49. 字母异位词分组](https://leetcode.cn/problems/group-anagrams/)
 - [ ] [128. 最长连续序列](https://leetcode.cn/problems/longest-consecutive-sequence/)
 - [ ] [347. 前 K 个高频元素](https://leetcode.cn/problems/top-k-frequent-elements/)
 - [ ] [380. O(1) 时间插入、删除和获取随机元素](https://leetcode.cn/problems/insert-delete-getrandom-o1/)
@@ -43,7 +43,7 @@
 - [ ] [155. 最小栈](https://leetcode.cn/problems/min-stack/)
 - [ ] [232. 用栈实现队列](https://leetcode.cn/problems/implement-queue-using-stacks/)
 - [ ] [496. 下一个更大元素 I](https://leetcode.cn/problems/next-greater-element-i/)
-- [ ] [739. 每日温度](https://leetcode.cn/problems/daily-temperatures/)
+- [x] [739. 每日温度](https://leetcode.cn/problems/daily-temperatures/)
 - [ ] [84. 柱状图中最大的矩形](https://leetcode.cn/problems/largest-rectangle-in-histogram/)
 
 ---
@@ -88,7 +88,7 @@
 - [ ] [122. 买卖股票的最佳时机 II](https://leetcode.cn/problems/best-time-to-buy-and-sell-stock-ii/)
 - [ ] [198. 打家劫舍](https://leetcode.cn/problems/house-robber/)
 - [ ] [213. 打家劫舍 II](https://leetcode.cn/problems/house-robber-ii/)
-- [ ] [322. 零钱兑换](https://leetcode.cn/problems/coin-change/)
+- [x] [322. 零钱兑换](https://leetcode.cn/problems/coin-change/)
 
 ### DP 进阶
 - [ ] [300. 最长递增子序列](https://leetcode.cn/problems/longest-increasing-subsequence/)
@@ -100,7 +100,7 @@
 
 ## 九、图 / BFS / 拓扑排序
 
-- [ ] [200. 岛屿数量](https://leetcode.cn/problems/number-of-islands/)
+- [x] [200. 岛屿数量](https://leetcode.cn/problems/number-of-islands/)
 - [ ] [207. 课程表](https://leetcode.cn/problems/course-schedule/)
 - [ ] [210. 课程表 II](https://leetcode.cn/problems/course-schedule-ii/)
 - [ ] [994. 腐烂的橘子](https://leetcode.cn/problems/rotting-oranges/)
@@ -112,3 +112,78 @@
 - [ ] [215. 数组中的第 K 个最大元素](https://leetcode.cn/problems/kth-largest-element-in-an-array/)
 - [ ] [347. 前 K 个高频元素](https://leetcode.cn/problems/top-k-frequent-elements/)
 - [ ] [703. 数据流中的第 K 大元素](https://leetcode.cn/problems/kth-largest-element-in-a-stream/)
+
+
+# 做题技巧
+# Python 算法面试核心笔记
+ #python/tips
+
+## 1. 数组初始化 (The Foundation)
+> [!CAUTION] 致命陷阱：浅拷贝
+> **绝对不要**使用 `[[0]*n]*m`。这会创建 $m$ 个指向同一个列表对象的引用。回溯等问题时，visited会不正常变化
+> 
+> ✅ **推荐做法：**
+> ```python
+> # 二维数组 (m行 n列)
+> dp = [[0 for _ in range(n)] for _ in range(m)]
+> ```
+
+---
+
+## 2. 哈希表与集合 (Hash & Set)
+> [!TIP] 技巧：使用 `defaultdict` 简化逻辑
+> 避免冗长的 `if key not in dict` 初始化。
+> ```python
+> from collections import defaultdict
+> # 自动创建列表
+> ans = defaultdict(list) 
+> ans[key].append(value)
+> 
+> # 自动计数器
+> count = defaultdict(int)
+> count[key] += 1
+> ```
+
+> [!WARNING] 哈希键 (Key) 的要求
+> 字典的 Key 必须是**不可变类型 (Hashable)**。
+> - **List** ❌ -> `tuple(my_list)` ✅
+> - **Dict** ❌ -> `tuple(sorted(my_dict.items()))` ✅
+> - **Set** ❌ -> `frozenset(my_set)` ✅
+
+---
+
+## 3. 字符串处理 (Strings)
+> [!SUCCESS] 性能优化
+> 1. **字符索引转换**：`idx = ord(char) - ord('a')` (处理 a-z 必备)。
+> 2. **高效拼接**：用 `"".join(list)` 替代 `s += "a"`（前者 $O(n)$，后者 $O(n^2)$）。拼接字符串的时候，先把需要拼接的放在一个list中，然后统一join。**在 Python 中，字符串是“不可变”的**
+
+---
+
+## 4. 搜索与递归 (DFS & BFS)
+> [!IMPORTANT] 递归深度与队列
+
+> 1. **高效队列 (BFS)**：使用 `collections.deque`。
+>    ```python
+>    from collections import deque
+>    queue = deque([root])
+>    node = queue.popleft() # O(1) 操作，list.pop(0) 是 O(n)
+>    ```
+
+---
+
+## 5. 常用技巧 Cheat Sheet
+| 场景 | 推荐语法 |
+| :--- | :--- |
+| **同时获取索引和值** | `for idx, val in enumerate(nums):` |
+| **同时遍历两个列表** | `for a, b in zip(list1, list2):` |
+| **反向遍历** | `for i in range(len(nums)-1, -1, -1):` |
+| **最大/最小整数** | `float('inf')` / `float('-inf')` |
+| **整除** | `5 // 2` (结果为 2) |
+
+---
+
+## 6. LeetCode 提交必备
+> [!NOTE] 结果转换
+> 即使你在代码里用的是 `defaultdict` 或 `deque`，最后返回给 LeetCode 的时候，一定要转换回标准类型：
+> - `return list(ans.values())`
+> - `return list(my_deque)`
