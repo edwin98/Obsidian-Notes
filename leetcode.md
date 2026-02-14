@@ -29,7 +29,7 @@
 
 - [ ] [19. 删除链表的倒数第 N 个结点](https://leetcode.cn/problems/remove-nth-node-from-end-of-list/)
 - [ ] [21. 合并两个有序链表](https://leetcode.cn/problems/merge-two-sorted-lists/)
-- [ ] [23. 合并 K 个升序链表](https://leetcode.cn/problems/merge-k-sorted-lists/)
+- [x] [23. 合并 K 个升序链表](https://leetcode.cn/problems/merge-k-sorted-lists/)
 - [ ] [141. 环形链表](https://leetcode.cn/problems/linked-list-cycle/)
 - [ ] [142. 环形链表 II](https://leetcode.cn/problems/linked-list-cycle-ii/)
 - [ ] [206. 反转链表](https://leetcode.cn/problems/reverse-linked-list/)
@@ -186,4 +186,93 @@
 > [!NOTE] 结果转换
 > 即使你在代码里用的是 `defaultdict` 或 `deque`，最后返回给 LeetCode 的时候，一定要转换回标准类型：
 > - `return list(ans.values())`
-> - `return list(my_deque)`
+> - `return list(my_deque)`# Merge K Lists & heapq — 核心经验总结
+
+---
+# heapq & Merge K Lists — 速记
+
+## 【heapq 核心】
+
+- Python heapq = 最小堆 (min-heap)
+- 堆顶 = heap[0]
+
+常用操作：
+
+    heappush(heap, x)      # O(log n)
+    heappop(heap)          # O(log n)
+    heapify(nums)          # O(n)
+
+---
+
+### 堆元素必须可比较
+
+错误：
+
+    heappush(heap, node)
+
+正确：
+
+    heappush(heap, (priority, node))
+
+---
+
+### 高频技巧
+
+最大堆：
+
+    heappush(heap, -val)
+
+TopK：
+
+    nlargest / nsmallest
+
+替换：
+
+    heappushpop / heapreplace
+
+---
+
+## 【链表核心原则】
+
+⭐ 拼接链表 = 改 next 指针
+
+错误：
+
+    cur = node
+
+正确：
+
+    cur.next = node
+    cur = cur.next
+
+---
+
+⭐ 不要修改 val 合并链表（坏味道）
+
+推荐：
+
+    直接复用节点
+
+---
+
+⭐ dummy 节点模板
+
+    dummy = ListNode(-1)
+    cur = dummy
+
+
+---
+
+## 【高频错误】
+
+- push node → 不可比较
+- 未加 index → 相同 val 炸
+- cur = node → 未修改链表
+- 忘记移动指针 → 链表错乱
+
+---
+
+## 【思维模型】
+
+heapq：动态最值维护 ≠ 排序  
+链表：操作 next ≠ 操作变量
