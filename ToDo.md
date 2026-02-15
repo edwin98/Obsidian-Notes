@@ -13,3 +13,8 @@
 - [ ] PPO\GRPO的区别
 - [ ] 读deepseek的技术报告
 - [ ] vllm的核心原理：PageAttention
+- [ ] Slide Window attention
+- [x] [[RoPE]]
+- [x] [[CoT、ToT、GoT]]
+- [ ] 多模态具体是怎么实现的
+- [ ] agentic RL的范围、实现、效果
