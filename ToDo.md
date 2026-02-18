@@ -1,5 +1,6 @@
 # [[RAG项目|无线豆包]]
 - [ ] 将无线豆包的流程全部写进去
+	- [ ] 补充框架图
 - [ ] 让gpt帮忙匹配合适的技术栈
 - [ ] 针对每个技术栈，详细了解具体的细节
 - [ ] 具体的细节，可以与[[技术八股]]中结合
@@ -14,7 +15,7 @@
 - [ ] 读deepseek的技术报告
 - [ ] vllm的核心原理：PageAttention
 - [ ] Slide Window attention
-- [x] [[RoPE]]
-- [x] [[CoT、ToT、GoT]]
+- [x] RoPE[[杂七杂八技术#RoPE编码]]
+- [x] CoT ToT GoT[[杂七杂八技术#CoT、ToT、GoT]]
 - [ ] 多模态具体是怎么实现的
 - [ ] agentic RL的范围、实现、效果
