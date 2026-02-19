@@ -64,7 +64,7 @@
 - [ ] [102. 二叉树的层序遍历](https://leetcode.cn/problems/binary-tree-level-order-traversal/)
 - [ ] [104. 二叉树的最大深度](https://leetcode.cn/problems/maximum-depth-of-binary-tree/)
 - [ ] [105. 从前序与中序遍历序列构造二叉树](https://leetcode.cn/problems/construct-binary-tree-from-preorder-and-inorder-traversal/)
-- [ ] [236. 二叉树的最近公共祖先](https://leetcode.cn/problems/lowest-common-ancestor-of-a-binary-tree/)
+- [x] [236. 二叉树的最近公共祖先](https://leetcode.cn/problems/lowest-common-ancestor-of-a-binary-tree/) #再看看
 - [ ] [437. 路径总和 III](https://leetcode.cn/problems/path-sum-iii/)
 - [ ] [543. 二叉树的直径](https://leetcode.cn/problems/diameter-of-binary-tree/)
 
@@ -72,8 +72,8 @@
 
 ## 七、回溯
 
-- [ ] [46. 全排列](https://leetcode.cn/problems/permutations/)
-- [ ] [47. 全排列 II](https://leetcode.cn/problems/permutations-ii/)
+- [x] [46. 全排列](https://leetcode.cn/problems/permutations/) #再看看 
+- [x] [47. 全排列 II](https://leetcode.cn/problems/permutations-ii/)
 - [ ] [78. 子集](https://leetcode.cn/problems/subsets/)
 - [ ] [79. 单词搜索](https://leetcode.cn/problems/word-search/)
 - [ ] [131. 分割回文串](https://leetcode.cn/problems/palindrome-partitioning/)
@@ -83,7 +83,7 @@
 ## 八、动态规划
 
 ### DP 基础
-- [ ] [70. 爬楼梯](https://leetcode.cn/problems/climbing-stairs/)
+- [x] [70. 爬楼梯](https://leetcode.cn/problems/climbing-stairs/)
 - [ ] [121. 买卖股票的最佳时机](https://leetcode.cn/problems/best-time-to-buy-and-sell-stock/)
 - [ ] [122. 买卖股票的最佳时机 II](https://leetcode.cn/problems/best-time-to-buy-and-sell-stock-ii/)
 - [ ] [198. 打家劫舍](https://leetcode.cn/problems/house-robber/)
