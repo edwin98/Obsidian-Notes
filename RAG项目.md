@@ -116,6 +116,7 @@ embedding 模型选择：[gte-multilingual-base](https://huggingface.co/Alibaba-
 | 重叠度 (Overlap) | N/A（由摘要覆盖全局语义）                | 10% ~ 15%         | 保持上下文连贯，避免截断公式 / 代码        |
 | 元数据注入         | 包含子节点 ID 列表、层级路径              | 回填父级摘要、层级路径、原始页码  | 标注 `is_continuation: true` |
 | 检索价值          | 解决“宏观 / 综述类”问题召回              | 解决“具体事实 / 数值”问题召回 | 提供技术实现细节、代码片段              |
+## 知识更新
 
 
 全流程的过程

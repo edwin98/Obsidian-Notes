@@ -20,7 +20,7 @@
 
 - [x] [49. 字母异位词分组](https://leetcode.cn/problems/group-anagrams/)
 - [ ] [128. 最长连续序列](https://leetcode.cn/problems/longest-consecutive-sequence/)
-- [ ] [347. 前 K 个高频元素](https://leetcode.cn/problems/top-k-frequent-elements/)
+- [x] [347. 前 K 个高频元素](https://leetcode.cn/problems/top-k-frequent-elements/)
 - [ ] [380. O(1) 时间插入、删除和获取随机元素](https://leetcode.cn/problems/insert-delete-getrandom-o1/)
 
 ---
@@ -75,7 +75,7 @@
 - [x] [46. 全排列](https://leetcode.cn/problems/permutations/) #再看看 
 - [x] [47. 全排列 II](https://leetcode.cn/problems/permutations-ii/)
 - [ ] [78. 子集](https://leetcode.cn/problems/subsets/)
-- [ ] [79. 单词搜索](https://leetcode.cn/problems/word-search/)
+- [x] [79. 单词搜索](https://leetcode.cn/problems/word-search/)
 - [ ] [131. 分割回文串](https://leetcode.cn/problems/palindrome-partitioning/)
 
 ---
@@ -109,8 +109,8 @@
 
 ## 十、堆 / TopK
 
-- [ ] [215. 数组中的第 K 个最大元素](https://leetcode.cn/problems/kth-largest-element-in-an-array/)
-- [ ] [347. 前 K 个高频元素](https://leetcode.cn/problems/top-k-frequent-elements/)
+- [x] [215. 数组中的第 K 个最大元素](https://leetcode.cn/problems/kth-largest-element-in-an-array/)
+- [x] [347. 前 K 个高频元素](https://leetcode.cn/problems/top-k-frequent-elements/)
 - [ ] [703. 数据流中的第 K 大元素](https://leetcode.cn/problems/kth-largest-element-in-a-stream/)
 
 
@@ -276,3 +276,6 @@ TopK：
 
 heapq：动态最值维护 ≠ 排序  
 链表：操作 next ≠ 操作变量
+
+
+找**最大**用**最小堆**，找**最小**用**最大堆**,创建指定的大小，然后去和堆顶的元素持续作比较
