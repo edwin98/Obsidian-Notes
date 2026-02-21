@@ -17,5 +17,5 @@
 - [ ] Slide Window attention
 - [x] RoPE[[杂七杂八技术#RoPE编码]]
 - [x] CoT ToT GoT[[杂七杂八技术#CoT、ToT、GoT]]
-- [ ] 多模态具体是怎么实现的[[杂七杂八技术#多模态的实现]]
+- [x] 多模态具体是怎么实现的[[杂七杂八技术#多模态的实现]]
 - [ ] agentic RL的范围、实现、效果
