@@ -31,16 +31,7 @@ description: Polish and optimize Markdown notes for clarity, formatting, and cor
    - **概念扩展与补充**：如果上下文中出现了未加解释的技术缩写（如 `ViT`, `RoPE` 等）或抽象概念，请在合适的位置或以引用的形式 `> [!info] 补充说明` 补充其关键定义。
    - **增加示例/对比表**：当发现文章只有干瘪的理论时，主动尝试补充一个极简的代码片段或应用场景的对比表格，使概念更具象。
 
-5. **Obsidian 生态增强 (Knowledge Graph & Meta Data)**
-   - **补充 YAML 元数据 (Frontmatter)**：在文件最顶端（第 1 行）根据文章内容自动生成或补全标准的 YAML 格式属性，用于归档和检索，例如（根据文章内容自动提取标签 `tags` 列表及修改状态即可）：
-     ```yaml
-     ---
-     tags: [自动提取的核心标签1, 标签2]
-     status: polished
-     ---
-     ```
-
-6. **执行修改与反馈**
+5. **执行修改与反馈**
    - 使用文件编辑工具（如 `replace_file_content` 或 `write_to_file`）将优化后的内容写回文件。
    - 保持用户原始观点的初衷，**绝不随意篡改用户原本正确的意思**。
    - 更新完成后，向用户提供一份简短的“修改报告”，列出你主要做了哪些方面的优化。
