@@ -10,7 +10,103 @@
 
 # 整体架构
 
-系统整体分为**知识召回**、**知识库构建**、**知识预处理**三大模块：
+系统整体分为**知识召回**、**知识库构建**、**知识预处理**三大核心模块。
+
+为了让你一目了然本系统的全貌，以下是全局工程架构与算法流转路线图（包含在线问答链路与离线数据流送链路）：
+
+```mermaid
+graph TD
+    %% 样式定义
+    classDef user fill:#3498db,stroke:#2980b9,stroke-width:2px,color:#fff;
+    classDef system fill:#2ecc71,stroke:#27ae60,stroke-width:2px,color:#fff;
+    classDef db fill:#f39c12,stroke:#d35400,stroke-width:2px,color:#fff;
+    classDef llm fill:#9b59b6,stroke:#8e44ad,stroke-width:2px,color:#fff;
+    classDef kafka fill:#e67e22,stroke:#d35400,stroke-width:2px,color:#fff;
+    classDef celery fill:#e74c3c,stroke:#c0392b,stroke-width:2px,color:#fff;
+    classDef empty fill:none,stroke:none,color:#fff;
+    
+    %% ---------------- 在线检索链路 ----------------
+    subgraph 在线检索与生成链路
+        U("无线端员工 <br/> 发起提问 Query"):::user -->|"HTTP / SSE"| APIGateway("FastAPI 智能路由中心")
+        APIGateway --> PydanticCheck["Pydantic 参数强校验 <br/> 防止越权与非法格式注入"]
+        PydanticCheck --> RedisCache[("Redis旁路底座 <br/> Session多级缓存 & 分布式防穿透")]:::db
+        
+        RedisCache -- "命中精确/语义缓存" --> Result("直接流式返回 <br/> 极速响应用户"):::user
+        
+        RedisCache -- "未命中/需深思" --> Rewrite["多路召回处理层 <br/> 指代消解 + 问题扩展衍生"]
+        Rewrite --> qwen4b["Qwen3-4B 改写微调模型"]:::llm
+        qwen4b -. "返回1~3个衍生子问题" .-> Rewrite
+        
+        Rewrite --> Router{"三级渐进式 <br/> 混合检索引擎"}
+        
+        subgraph 第一层粗筛
+            Router -->|"并发请求"| ES["Elasticsearch 文本底座 <br/> BM25 专有词频检索"]:::db
+            Router -->|"并发请求"| Milvus1["Milvus 向量底座 <br/> 384维 轻量级向量检索"]:::db
+        end
+        
+        subgraph 第二层精筛
+            ES --> RSF("RSF 归一化融合打分 <br/> 依据Token长短动态调节权重 α")
+            Milvus1 --> RSF
+            RSF --> Milvus2["Milvus 向量底座 <br/> 结合用户 SAP 画像 <br/> 768维 密集语义检索"]:::db
+        end
+        
+        subgraph 第三层精排
+            Milvus2 --> Reranker["gte-multilingual-reranker-0.3B <br/> Cross-Encoder 交叉互动打分"]:::llm
+            Reranker --> DocList("Top 10 相关碎片化 Chunk <br/> + 内联参考引文信息")
+        end
+        
+        DocList --> Generator["最终答案生成大模型 <br/> 携带防幻觉强约束 System Prompt"]:::llm
+        Generator -- "逐字流式响应" --> SSE("SSE 打字机流推流协议")
+        SSE --> Result
+        SSE -. "异步存储供下轮复用" .-> RedisCache
+        
+        %% 背景离线异步任务
+        RedisCache -. "轮次溢出监控" .-> CeleryTask["Celery <br/> 离线摘要调度中心"]:::celery
+        CeleryTask -->|"异步抽离丢弃不关键废话"| Summarizer["4B模型上下文历史浓缩"]:::llm
+        Summarizer -. "覆盖旧历史缓存" .-> RedisCache
+    end
+
+    %% ---------------- 离线知识摄入与预处理流水线 ----------------
+    subgraph 离线百万级知识集入库流水线
+        Docs("企业多模态异构资料 <br/> PDF/Word/Excel/Web"):::user --> Parser["DocumentParser <br/> 页面抽取 / HTML剥离 /  OCR"]
+        Parser -->|"归一化"| Markdown("统一标准 Markdown 版式层")
+        
+        Markdown --> Splitter["ChunkSplitter 层级树切分器 <br/> 基于标题结构的层次化切分"]
+        
+        Splitter -->|"非叶子总览节点"| Chunk1("递归切片 / 大模型摘要平替")
+        Splitter -->|"短叶子节点 / 公式"| Chunk2("512~800 步长与重叠率控制算法")
+        
+        Chunk1 & Chunk2 --> KafkaBus{"Kafka 消息总线 <br/> 分 Topic 高吞吐缓冲分流"}:::kafka
+        
+        KafkaBus -->|"消耗大的图像/PPT"| GPU_Worker["GPU 密集计算承接组"]
+        KafkaBus -->|"通用文本处理"| CPU_Worker["CPU 高主频计算承接组"]
+        
+        GPU_Worker & CPU_Worker --> DataWrangler["清洗清洗消毒池 <br/> 正则剔乱码 / AutoPhrase匹配 / 映射标签"]
+        
+        DataWrangler --> SemanticBranch("语义分路")
+        DataWrangler --> LexicalBranch("词法分路")
+        
+        SemanticBranch --> Embedder["领域特调 Embedding 模型 <br/> 产出 384维 与 768维 表征特征"]:::llm
+        LexicalBranch --> IKAnalyzer["挂载内部基站无线字典的 分词器"]
+        
+        Embedder -->|"HNSW索引 + 标量过滤"| VectorDB[("Milvus 千万级 <br/> 核心密集向量矩阵库")]:::db
+        IKAnalyzer -->|"倒排索引"| KeywordDB[("Elasticsearch <br/> 核心BM25关键词检索库")]:::db
+        
+        %% 维护架构映射逻辑
+        DataWrangler -. "绑定 1+X+Y <br/> CQIC项目分类架构标量" .-> VectorDB
+    end
+
+    %% ---------------- 虚线连接在线离线核心资产底座 ----------------
+    KeywordDB -. "数据就绪提供倒排支持" .-> ES
+    VectorDB -. "数据就绪提供并发相似算力" .-> Milvus1
+    VectorDB -. "数据就绪提供深语义算力" .-> Milvus2
+```
+
+**上述流程图将系统切分为两大核心战场**：
+1. 上方为**在线高并发链路**，它以 FastAPI 承载请求，经过 Redis 拦截防撞、多路大模型改写及三级逐层过滤，在极限的几秒钟内挤压出最切题的文档。
+2. 下方为**重载长周期数据摄入链路**，它被 Kafka 这个异步总线完美隔断。无论后台一天吐入十万本手册，也能闲庭信步地交给重型计算节点处理，安静灌入两座核心大数据库（Elasticsearch 和 Milvus），绝不波及在线实时问答的丝滑体验。
+
+---
 
 **知识召回：**
 - **多路召回**：将原始问题改写为多个子问题，基于多问题并行检索，提升召回覆盖率
@@ -71,7 +167,7 @@
 
 ## 三级召回
 
-系统仅使用一个 Elasticsearch 库，为保证检索的稳定性与准确性，采用**三层渐进式召回**策略：
+系统架构以 **[[01_技术栈/Milvus]]** 向量引擎与独立 **[[01_技术栈/Elasticsearch]]** (支持 BM25) 全文检索引擎组合底座。为保证检索的稳定性与准确性，融合二者优势采用**三层渐进式召回**策略：
 
 1. **第一层（粗筛）**：BM25 + 384 维向量库检索，各召回 1500 条，合并后共 3000 条（实验验证该层准确率达 **99% 以上**）。输入为无线统一知识库，输出 3000 篇候选文档。
 2. **第二层（精筛）**：BM25 + 768 维向量库检索，基于用户 SAP 画像动态调整两种召回方式的权重配比。输入 3000 篇文档 + 员工画像信息，输出 80 篇文档。
@@ -278,11 +374,34 @@ BM25 词频库的构建有两个核心要点：
 
 在多轮对话场景中，盲目拼接历史记录不仅会导致大模型的 Token 快速耗尽上限，还会导致“注意力稀释”。为此我们在记忆模块实现了**多级状态管理与动态修剪机制**：
 
-### 1. 对话记忆的底层物理实现
-- **Redis 结构化存储**：采用 `Hash` 与 `List` 结合的结构来持久化 Session。
-  - **Key 设计**：`session:{user_id}:{session_id}`，其下挂载 `[{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]` 的历史消息列表。
-  - **生命周期（TTL）**：由于研发问答具备强上下文的即时性特征，将会话闲置 TTL 统一设置为 2 小时，到期自动回收内存资源。
-- **并发安全**：在极个别高频连续提问引发并发请求时，通过 Redis 的分布式读写锁（如 Redisson 类似机制）保障同一个会话下的历史消息按时序串行更新。
+### 1. [[01_技术栈/Redis]] 多级缓存与状态管理机制
+
+为了将系统耗时压至极限并缓解大模型的昂贵调用计算，在系统中深度引入 **[[01_技术栈/Redis]]** 作为状态底座与旁路缓存：
+
+**① 历史会话的持久化管理 (Session State)**
+- **数据结构选型**：采用 `List` 结构持久化 Session，结合 `Hash` 存储会话元信息。
+  - **Key 设计**：`session:{user_id}:{session_id}:messages`，其下挂载完整的历史消息列表。
+  - **生命周期（TTL）**：由于研发问答具备强上下文的即时性特征，设置闲置 TTL 为 2 小时回收内存。遇到高频连续提问，利用 Redis + Lua 脚本实现分布式读写锁互斥，保障消息时序串行。
+
+**② 精确匹配与事实性结果缓存 (Result Cache)**
+- 对于高频、通用的标准问询（如“5G的定义是什么”），使用 Redis 存储原始 Query 转换的 MD5 值，直接映射大模型生成的优质答案。
+- **缓存穿透防范**：遇到热点失效时，利用 Redis 分布式锁保障只允许一个请求穿透到后端大模型，其余请求短暂自旋获取更新后的缓存命中。
+
+**③ 语义相似度缓存 (Semantic Cache)**
+- 利用高效向量将请求映射为低维特征空间，基于 Redis Vector 模组（或外挂快速近似引擎）判断相似比对。若新问题与历史请求高度共价（如“随机接入机制是啥”对应过“随机接入是什么”），直接重用答案，这是旁路跳过海量知识 RAG 推理的最高效捷径。
+
+**Redis 缓存拦截流程图**：
+
+```mermaid
+graph TD
+    A[用户发起新 Query] --> B{Redis 精确/语义缓存命中了?}
+    B -- 是 (Hit) --> C[直接返回 Redis 存储的标准答案 < 50ms]
+    B -- 否 (Miss) --> D[执行完整 RAG 检索流]
+    D --> E[Milvus 检索 & Rerank 精排]
+    E --> F[大语言模型归纳生成答案]
+    F --> G[异步写入 Redis 缓存: SETEX query_hash response 86400]
+    G --> H[将答案通过 SSE 推送给用户]
+```
 
 ### 2. 动态滑动窗口与 Token 计费
 - **事前 Token 估算**：并非机械地保留“最近 5 轮对话”，而是引入了与大模型严格对齐的本地 Tokenizer（如 tiktoken 或 Qwen 原生分词器）。在每次发起组合请求前，先计算历史队列的总体 Token 排量。
@@ -293,7 +412,7 @@ BM25 词频库的构建有两个核心要点：
 
 ### 3. 超长对话的摘要压缩机制（Summarization）
 当用户在一个 Session 中深度探讨复杂技术且轮次极长时，直接截断会导致关键线索丢失。此时系统会触发旁路异步能力：
-- 后台任务（Celery 调度）侦测到历史 Token 超过预算，会调用一个轻量级模型（如 Qwen3-4B）传入历史内容并指令：`“请总结上述用户与 AI 的交互核心技术点与已确认的客观事实，需以精简的要点呈现。”`
+- 后台任务（[[01_技术栈/Celery]] 调度）侦测到历史 Token 超过预算，会调用一个轻量级模型（如 Qwen3-4B）传入历史内容并指令：`“请总结上述用户与 AI 的交互核心技术点与已确认的客观事实，需以精简的要点呈现。”`
 - 将总结出的精炼文本打包为一条 `{"role": "system", "content": "前情提要:..."}` 塞入新一轮对话顶部，极大释放了上下文窗口，同时保证了问答逻辑断层的无缝衔接。
 
 ---
@@ -344,9 +463,18 @@ BM25 词频库的构建有两个核心要点：
 
 ## 知识库索引更新机制与底座建设
 
-### 1. ES 单一向量引擎深度利用
-出于系统的可维护性和内部安全管理考量，本方案坚决剔除了繁杂且重维护的专有向量库（如 Milvus），转而直接深挖 **Elasticsearch（8.x+ dense vector 插件）**的性能。
-- **HNSW 算法调优**：在创建 mapping 时开启了近似最近邻（ANN）加速，并根据数据规模专项优化了图结构构网参数：适度调高了 `m`（节点允许的最大邻居数）和 `ef_construction`（构建时候选集大小），以牺牲极少量索引创建期间的 CPU 和时间开销，搏取了检索时毫秒级的并发吞吐抗压能力。
+### 1. [[01_技术栈/Milvus]] 十亿级向量引擎深度利用与优化
+随着知识库规模的爆发式增长（达千万级 Chunk），系统全面引入企业级专属的高维度向量数据库 **[[01_技术栈/Milvus]]**，以支撑超高并发与更低延迟语义检索。彻底分离了原有 ES 集群中倒排与密集的算力争抢。
+
+**核心技术细节与调优策略：**
+- **索引类型选择与硬件调优（HNSW）**：
+  应对大量高维向量检索，在 Milvus 底层建立基于图的 `HNSW` 索引：
+  - `M` (每个节点允许最大连接边数) 压至 32，在内存占用及图搜素精度间取得甜点。
+  - `efConstruction` 提至 256，充分调用内存吞吐换取建库阶段的最优图联通度。
+  - 动态 `ef` 搜素配置：单机搜索调整在 128 上下，以微弱延迟获取 99% 精搜召回质量。
+
+- **多标签标量混合搜索（Hybrid Search & Scalar Filtering）**：
+  由于 Milvus 具有独特的 Collection 划分与 Schema 定义结构，内部利用其 Attribute Filtering 赋予预分类标签如：`pdu`、`cqic_tags`。实现毫秒级的段落前置截断过滤（Pre-filtering），不再向计算层抛喂无关数据。
 
 ### 2. 数据生命周期与平滑更新保障
 面对线上随时可能发生的文档修正与淘汰：
@@ -359,14 +487,20 @@ BM25 词频库的构建有两个核心要点：
 
 ## 基础设施与极简框架组件思路
 在大语言模型应用刚起步时，大多数团队倾向全盘使用 `LangChain` 或 `LlamaIndex`。但为了应对百万级文档和定制重排链路，高度黑盒化的商业组件反而成了扩展的泥沼：
-- **自研微型编排骨架**：团队摒弃臃肿框架，从 0 抽离了四大核心抽象类：`DocumentParser`, `ChunkSplitter`, `PipelineRetriever` 以及 `LLMGenerator`。整个链路上下文配置由 Python 原生的 **Pydantic** 提供数据结构校验强力支撑，保障链路流转的参数绝对合规（如大模型超参限制等类型检查）。
+- **自研微型编排骨架**：团队摒弃臃肿框架，从 0 抽离了四大核心抽象类：`DocumentParser`, `ChunkSplitter`, `PipelineRetriever` 以及 `LLMGenerator`。整个链路上下文配置由 Python 原生的 **[[01_技术栈/Pydantic]]** 提供数据结构校验强力支撑，保障链路流转的参数绝对合规（如大模型超参限制等类型检查）。
 - **灌水期（Ingestion）限流与削峰机制**：曾踩过最痛的坑就是在并行启动海量文档切分处理并调用大模型做摘要替换时，触发模型底座服务端 Rate Limit 导致大面积 HTTP 429 报错断流。后采取了**指数退避（Exponential Backoff）重试算法**与队列分发机制，构建出了拥有自我保护能力的稳健灌库车间。
 
 ## 服务端技术栈与实时交互链路
 
-### 1. Python + FastAPI 的微服务架构
-- 在线系统选用了 **FastAPI** 作为 web 骨架。其底座原生构建于 `asyncio` 事件循环之上，对于 RAG 这种需要并发长链接和网络 I/O 密集型操作（ES 搜索等待、RPC / HTTP 调用大模型）拥有极高的吞吐效率。
-- 大体量的 PDF 解析、知识多模态归纳与向量入库耗时漫长，且易产生资源尖峰。该板块被解耦并剥离，服务端采用 **Kafka 作为核心消息中间件**。FastAPI 节点接收更新任务后仅作为 Producer 投递消息立即返回，后端的数个 Worker 消费集群作为 Consumer 根据 Topic 分流执行高耗时的 OCR 分词灌水作业。得益于 Kafka 提供的高吞吐、持久化积压和 Consumer Group Partition（分区机制），完美实现了离线计算灌录与在线毫秒级 QA 搜索在 CPU/显存层的物理和逻辑硬隔离。
+### 1. Python + [[01_技术栈/FastAPI]] 的微服务架构
+- 在线系统选用了 **[[01_技术栈/FastAPI]]** 作为 web 骨架。其底座原生构建于 `asyncio` 事件循环之上，对于 RAG 这种需要并发长链接和网络 I/O 密集型操作（ES 搜索等待、RPC / HTTP 调用大模型）拥有极高的吞吐效率。
+- **基于 [[01_技术栈/Kafka]] 消息中间件剥离离线高耗时计算**
+  大体量的 PDF 解析、知识多模态归纳与向量组装入库不仅耗时长，且极易诱发尖刺性 OOM 资源耗尽。我们将处理层剥离解耦，服务端采用 **[[01_技术栈/Kafka]] 作为核心消息总线枢纽**。
+
+**流水线机制与部署策略详情**：
+1. **异步推投 (Producer 生产化发后即忘)**：FastAPI 线上节点接取工单后即作 Producer 推送 JSON 指令快速返回 200，绝不阻滞主协程。
+2. **多态资源组隔离隔离 (Consumer Group 分区隔离)**：利用 Kafka Topic 特性拆解流水操作（如：`topic_pdf_ocr` 分发给装载 T4 GPU 集群专做图像，`topic_text_slice` 送去纯 CPU 高主频节点计算词性）。由 Kafka Broker 的 Consumer Group 调配偏移量，做到容错不重漏（At-Least / Exactly-Once）。
+3. **弹性抗压**：业务繁忙知识库并发重建时，依托 Kafka 内置高吞吐写入持久化特性安全接纳全部洪峰指令。
 
 ### 2. 高效推流交互（Server-Sent Events）
 这是“提升用户感知速度”体验的最重要手段。由于 Rerank + LLM 长文推断天然需要 2-5 秒以上的绝对用时：
