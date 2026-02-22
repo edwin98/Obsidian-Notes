@@ -11,3 +11,37 @@ Thumbs.db
 
 # Optional: log files
 *.log
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# Data
+*.db
+*.json
+*.txt
+*.md
+
+# Logs
+logs/
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Trash
+.trash/
+
+# Optional: log files
+*.log
