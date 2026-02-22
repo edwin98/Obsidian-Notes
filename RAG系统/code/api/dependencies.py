@@ -6,7 +6,7 @@ import logging
 
 from cache.redis_cache import RedisCache
 from config.settings import Settings
-from generation.llm_generator import MockLLMGenerator
+from generation.llm_generator import GeminiLLMGenerator, MockLLMGenerator
 from generation.query_rewriter import QueryRewriter
 from generation.token_budget import TokenBudgetManager
 from ingestion.chunk_splitter import HierarchicalChunkSplitter
@@ -45,12 +45,17 @@ class Components:
         self.parser = MarkdownDocumentParser()
         self.cleaner = DataCleaner()
         self.splitter = HierarchicalChunkSplitter(self.settings)
-        self.rewriter = QueryRewriter()
+        self.rewriter = QueryRewriter(self.settings)
         self.token_budget = TokenBudgetManager(
             total_budget=self.settings.token_budget_total,
             system_reserve=self.settings.system_prompt_token_reserve,
         )
-        self.generator = MockLLMGenerator(self.token_budget)
+        if self.settings.llm_provider == "gemini":
+            self.generator = GeminiLLMGenerator(self.token_budget, self.settings)
+            logger.info("[Init] LLM Provider: Gemini (%s)", self.settings.gemini_model)
+        else:
+            self.generator = MockLLMGenerator(self.token_budget)
+            logger.info("[Init] LLM Provider: Mock")
 
         # chunk 全局存储
         self.chunk_store: dict[str, DocumentChunk] = {}

@@ -58,7 +58,7 @@ class BM25Engine:
                 }
             },
         }
-        self._es.indices.create(index=self.index_name, body=mappings)
+        self._es.indices.create(index=self.index_name, **mappings)
         logger.info("[ES] 创建索引: %s", self.index_name)
 
     def index_chunk(self, chunk: DocumentChunk) -> None:
@@ -97,7 +97,7 @@ class BM25Engine:
             },
         }
 
-        resp = self._es.search(index=self.index_name, body=body)
+        resp = self._es.search(index=self.index_name, **body)
         results = []
         for hit in resp["hits"]["hits"]:
             results.append((hit["_id"], hit["_score"]))

@@ -2,6 +2,10 @@
 
 生产环境对接大语言模型 API（携带防幻觉强约束 System Prompt）。
 Demo 中使用上下文片段拼装模拟，但展示完整的 Prompt 结构。
+
+支持的 Provider：
+- mock：本地规则拼装，无需 API Key
+- gemini：Google Gemini API（需设置 RAG_GEMINI_API_KEY 环境变量）
 """
 
 from __future__ import annotations
@@ -125,3 +129,100 @@ class MockLLMGenerator(LLMGenerator):
         )
 
         return "\n".join(answer_parts)
+
+
+class GeminiLLMGenerator(LLMGenerator):
+    """Google Gemini API 生成器，支持流式输出。
+
+    使用方式：
+        设置环境变量 RAG_GEMINI_API_KEY=<your_key>
+        设置环境变量 RAG_LLM_PROVIDER=gemini
+    """
+
+    def __init__(self, token_budget: TokenBudgetManager, settings):
+        self.token_budget = token_budget
+        self.settings = settings
+        self._client = None
+
+    def _get_client(self):
+        """懒加载 Gemini 客户端。"""
+        if self._client is None:
+            try:
+                from google import genai
+            except ImportError as e:
+                raise ImportError(
+                    "缺少 google-genai 依赖，请执行: uv add google-genai"
+                ) from e
+
+            if not self.settings.gemini_api_key:
+                raise ValueError(
+                    "未配置 Gemini API Key，请设置环境变量 RAG_GEMINI_API_KEY"
+                )
+
+            self._client = genai.Client(api_key=self.settings.gemini_api_key)
+        return self._client
+
+    async def generate_stream(
+        self,
+        query: str,
+        context_chunks: list[DocumentChunk],
+        history: list[dict] | None = None,
+    ) -> AsyncIterator[str]:
+        """调用 Gemini API 流式生成答案。"""
+        from google.genai import types
+
+        client = self._get_client()
+
+        # 构建上下文
+        context_text = self._build_context(context_chunks)
+
+        # Token 预算修剪历史
+        trimmed_history = []
+        if history:
+            trimmed_history = self.token_budget.trim_history(
+                ANTI_HALLUCINATION_SYSTEM_PROMPT,
+                history,
+                query,
+            )
+
+        # 转换消息格式（OpenAI role -> Gemini role）
+        gemini_history = []
+        for msg in trimmed_history:
+            role = "model" if msg["role"] == "assistant" else "user"
+            gemini_history.append(
+                types.Content(role=role, parts=[types.Part(text=msg["content"])])
+            )
+
+        # 当前用户消息（含检索上下文）
+        user_message = f"参考资料：\n{context_text}\n\n问题：{query}"
+        contents = gemini_history + [
+            types.Content(role="user", parts=[types.Part(text=user_message)])
+        ]
+
+        config = types.GenerateContentConfig(
+            system_instruction=ANTI_HALLUCINATION_SYSTEM_PROMPT,
+            temperature=self.settings.gemini_temperature,
+            max_output_tokens=self.settings.gemini_max_output_tokens,
+        )
+
+        logger.info(
+            "[Gemini] 调用 %s，历史 %d 轮，context %d chars",
+            self.settings.gemini_model,
+            len(trimmed_history),
+            len(context_text),
+        )
+
+        async for chunk in await client.aio.models.generate_content_stream(
+            model=self.settings.gemini_model,
+            contents=contents,
+            config=config,
+        ):
+            if chunk.text:
+                yield chunk.text
+
+    def _build_context(self, chunks: list[DocumentChunk]) -> str:
+        """构建 <context> 标签包裹的参考资料。"""
+        parts = []
+        for chunk in chunks:
+            parts.append(f"[{chunk.chunk_id}] {chunk.text}")
+        return "<context>\n" + "\n---\n".join(parts) + "\n</context>"

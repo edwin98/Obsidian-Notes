@@ -58,31 +58,112 @@ ABBREVIATION_MAP = {
 
 
 class QueryRewriter:
-    """指代消解 + 问题扩展。"""
+    """指代消解 + 问题扩展。
+
+    优先调用与 LLM 生成器相同的 Gemini 模型；
+    如未配置或调用失败，自动降级到规则模式。
+    """
+
+    def __init__(self, settings=None):
+        self.settings = settings
+        self._client = None
+
+    def _get_client(self):
+        """懒加载 Gemini 同步客户端（与 GeminiLLMGenerator 共用同一 API Key）。"""
+        if self._client is None:
+            try:
+                from google import genai
+            except ImportError as e:
+                raise ImportError(
+                    "缺少 google-genai 依赖，请执行: uv add google-genai"
+                ) from e
+            self._client = genai.Client(api_key=self.settings.gemini_api_key)
+        return self._client
 
     def rewrite(self, query: str, history: list[dict] | None = None) -> list[str]:
-        """返回 1~3 个改写后的查询（原始查询始终在首位）。"""
+        """返回 1~3 个改写后的查询（首位为最优查询）。"""
+        if self.settings and self.settings.llm_provider == "gemini":
+            try:
+                result = self._rewrite_with_gemini(query, history)
+                logger.info("[Rewrite][Gemini] '%s' -> %s", query, result)
+                return result
+            except Exception as e:
+                logger.warning("[Rewrite] Gemini 改写失败，降级到规则模式: %s", e)
+
+        result = self._rewrite_rule_based(query, history)
+        logger.info("[Rewrite][Rule] '%s' -> %s", query, result)
+        return result
+
+    def _rewrite_with_gemini(
+        self, query: str, history: list[dict] | None = None
+    ) -> list[str]:
+        """调用 Gemini 执行指代消解和问题扩展，返回改写查询列表。"""
+        import json
+
+        from google.genai import types
+
+        client = self._get_client()
+
+        history_text = "\n".join(
+            f"{m['role']}: {m['content']}" for m in (history or [])[-4:]
+        )
+        prompt = USER_PROMPT_TEMPLATE.format(
+            history=history_text or "（无历史）",
+            query=query,
+        )
+
+        response = client.models.generate_content(
+            model=self.settings.gemini_model,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_PROMPT,
+                temperature=0.2,
+                max_output_tokens=512,
+                response_mime_type="application/json",  # 强制输出裸 JSON，无 fence 无前缀
+            ),
+        )
+
+        text = (response.text or "").strip()
+        if not text:
+            raise ValueError("Gemini 返回空响应")
+
+        data = json.loads(text)
+
+        queries: list[str] = []
+
+        # resolved_query 作为首选（已消解指代的完整问题）
+        resolved = (data.get("resolved_query") or "").strip()
+        queries.append(resolved if resolved else query)
+
+        # 追加扩展问题
+        for eq in data.get("expanded_queries") or []:
+            eq = eq.strip()
+            if eq and eq not in queries:
+                queries.append(eq)
+
+        return queries[:3]
+
+    # ── 规则降级实现 ────────────────────────────────────────────────────────
+
+    def _rewrite_rule_based(
+        self, query: str, history: list[dict] | None = None
+    ) -> list[str]:
         queries = [query]
 
-        # 1. 指代消解
         if history:
             resolved = self._resolve_references(query, history)
             if resolved and resolved != query:
                 queries.append(resolved)
 
-        # 2. 缩写扩展
         expanded = self._expand_abbreviations(query)
         if expanded and expanded != query and expanded not in queries:
             queries.append(expanded)
 
-        # 3. 同义改写
         paraphrased = self._paraphrase(query)
         if paraphrased and paraphrased not in queries:
             queries.append(paraphrased)
 
-        queries = queries[:3]
-        logger.info("[Rewrite] '%s' -> %s", query, queries)
-        return queries
+        return queries[:3]
 
     def _resolve_references(self, query: str, history: list[dict]) -> str | None:
         """指代消解：将代词还原为上文提到的具体概念。"""
@@ -92,13 +173,10 @@ class QueryRewriter:
         if not has_pronoun:
             return None
 
-        # 从历史中提取最近的主题
         last_topic = None
         for msg in reversed(history):
             if msg.get("role") == "user":
-                # 提取名词短语作为主题
                 content = msg["content"]
-                # 简单提取：取「是什么」前面的部分，或取整个问题
                 match = re.search(r"(.+?)(?:是什么|有什么|怎么|如何)", content)
                 if match:
                     last_topic = match.group(1).strip()
@@ -123,8 +201,7 @@ class QueryRewriter:
         return expanded if expanded != query else None
 
     def _paraphrase(self, query: str) -> str | None:
-        """同义改写（Demo 规则版，生产环境由 LLM 生成）。"""
-        # 问句转换
+        """同义改写（规则版）。"""
         replacements = [
             ("是什么", "的定义和概念"),
             ("怎么工作", "的工作原理"),

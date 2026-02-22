@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     elasticsearch_url: str = "http://localhost:9200"
     milvus_host: str = "localhost"
     milvus_port: int = 19530
-    kafka_bootstrap_servers: str = "localhost:9092"
+    kafka_bootstrap_servers: str = "127.0.0.1:9092"
 
     # ---- RSF 算法参数 ----
     rsf_alpha_base: float = 0.4
@@ -58,5 +58,12 @@ class Settings(BaseSettings):
     # ---- Celery ----
     celery_broker_url: str = "redis://localhost:6379/1"
     celery_result_backend: str = "redis://localhost:6379/2"
+
+    # ---- LLM Provider ----
+    llm_provider: str = "gemini"  # "mock" | "gemini"
+    gemini_api_key: str = "AIzaSyDMQsbyfqzQMrDYBoKqs0Dr6meEGNLgGIw"
+    gemini_model: str = "gemini-3-flash-preview"
+    gemini_temperature: float = 0.1
+    gemini_max_output_tokens: int = 2048
 
     model_config = {"env_prefix": "RAG_"}
