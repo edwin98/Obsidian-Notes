@@ -60,8 +60,8 @@ class Settings(BaseSettings):
     celery_result_backend: str = "redis://localhost:6379/2"
 
     # ---- LLM Provider ----
-    llm_provider: str = "gemini"  # "mock" | "gemini"
-    gemini_api_key: str = "AIzaSyDMQsbyfqzQMrDYBoKqs0Dr6meEGNLgGIw"
+    llm_provider: str = "gemini"  # "mock" | "gem  ini"
+    gemini_api_key: str = ""
     gemini_model: str = "gemini-3-flash-preview"
     gemini_temperature: float = 0.1
     gemini_max_output_tokens: int = 2048
