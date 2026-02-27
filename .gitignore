@@ -26,7 +26,6 @@ venv/
 *.db
 *.json
 *.txt
-*.md
 
 # Logs
 logs/
@@ -46,3 +45,4 @@ Thumbs.db
 # Optional: log files
 *.log
 nul
+.*/
