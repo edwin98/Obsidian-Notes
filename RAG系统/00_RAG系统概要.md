@@ -445,6 +445,29 @@ graph TD
 
 ---
 
+## 基于 LangChain 的权限控制与数据隔离 (RBAC)
+
+企业级 RAG 系统面临的最严峻的安全合规挑战之一就是**数据越权访问**（例如：外部外包员工通过大模型越权套取核心架构源码，或普通员工查阅高管机密方案）。传统的应用层验权无法约束到向量检索与模型生成的深水区，因此我们在链路中深度定制了基于 LangChain 的细粒度权限管控。
+
+### 1. 权限信息的端到端透传 (RunnableConfig)
+大模型应用天然采用多并发、流式异步调用，直接依赖线程上下文或全局变量的鉴权极易发生并发串键。我们利用了 LangChain 核心架构体系中的 `RunnableConfig` 组件：
+- 当应用网关 (FastAPI) 接收并验证用户的鉴权 Token 后，会向统一下游解析出用户的关键画像信息（包含其所属的 `PDU 部门`、`安全控制级别 (Level)` 以及参与的封闭 `安全项目组标签`）。
+- 我们将这份画像对象化，并封装入 `RunnableConfig` 的 `configurable` 字典中。借由 LCEL (LangChain Expression Language) 的管道流转特性，这份安全签名能够自动且原汁原味地向后传递给**向量检索、工具调用、大模型生成**的每一个节点。
+
+### 2. 深入底层的数据拦截 (自定义 BaseRetriever)
+最安全的防泄密做法不是指望大模型去“懂事地闭嘴”，而是在**数据库拉取数据之前就执行强制的物理隔离过滤（Pre-Filtering）**。
+- 我们摒弃了调用 `similarity_search` 等默认封装，而是继承并重写了 LangChain 的基类 `BaseRetriever`，打造了带有企业鉴权机制的自定义检索器 `RBAC_Milvus_Retriever`。
+- 在内部拦截 `_get_relevant_documents` 与 `_aget_relevant_documents` 核心方法，动态提取出游走至此的权限 Config。
+- 将用户的多维度权限拼接为一个符合底层检索引擎（ES 或 Milvus）语法的**强校验标量表达式（Boolean Expr）**。
+
+### 3. 结合 "1+X+Y" 构建坚固防线
+这一系列流转最终落地于我们的 1+X+Y 元数据分类架构上：
+- 一份最高级的架构设计文档入库（Ingestion）时，早已被打上了诸如 `security_level: 4` 和 `project_tag: ["CQIC_Core_TopSecret"]` 等预制签。
+- 被权限改写过后的 Milvus 检索请求将在原有向量距离计算的基础条件上，被强行附加上拦截算子，例如 `expr="(doc.security_level <= user.level) and (doc.project_tag in user.projects)"`。
+- **业务收益与底线捍卫**：哪怕攻击者使用再花哨的“越狱提示词（Jailbreak Prompts）”去套话模型，由于底座查询层已经被硬隔离截断，传导至大模型 Prompt 上下文里的 `<context>` 池将是干干净净的合法资料。这种**“查不到就绝对编不准”**的特点，彻底掐断了 AI 数据泄露的恶链，使得无差别全员上线部署真正成为可能。
+
+---
+
 ## 重排（Rerank）机制进阶实现细节
 
 重排是精度提升的最后一道关卡。原先的双塔模型将文档与问题独立向量化后求内积，失去了细粒度语义交互；引入交叉编码器（Cross-Encoder）解决了上述痛点，但也带来了高昂的算力开销。
