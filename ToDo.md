@@ -19,3 +19,7 @@
 - [x] CoT ToT GoT[[杂七杂八技术#CoT、ToT、GoT]]
 - [x] 多模态具体是怎么实现的[[杂七杂八技术#多模态的实现]]
 - [ ] agentic RL的范围、实现、效果
+- [ ] LangChain、LammaIndex、LangGraph框架学习
+- [ ] SFT\RLHF\RL
+- [ ] RAG中，为什么使用RSF而非RRF
+- [ ] 实现模型评价的方式
