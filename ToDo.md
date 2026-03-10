@@ -21,5 +21,5 @@
 - [ ] agentic RL的范围、实现、效果
 - [ ] LangChain、LammaIndex、LangGraph框架学习
 - [ ] SFT\RLHF\RL
-- [ ] RAG中，为什么使用RSF而非RRF
+- [x] RAG中，为什么使用RSF而非RRF
 - [ ] 实现模型评价的方式
