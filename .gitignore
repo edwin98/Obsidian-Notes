@@ -46,3 +46,7 @@ Thumbs.db
 *.log
 nul
 .*/
+# Environment variables (secrets)
+.env
+.env.*
+!.env.example
