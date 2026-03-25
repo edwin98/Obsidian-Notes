@@ -268,6 +268,76 @@ FPR = |{正常用例 : 被错误拦截}| / |所有正常用例|
 可接受上限：FPR < 5%
 ```
 
+### 3.5 缺陷召回率（Defect Recall Rate，DRR）
+
+**评测目标**：Agent 的最终报告是否识别出了测试场景中所有已知的真实缺陷。
+
+**为什么需要 DRR，而不能只看 TSR**：
+
+TSR 只检查最终判定（PASS/FAIL）是否正确，是一个**结论层的二元指标**。但一个场景可能同时存在多条缺陷，Agent 可能给出了正确的 FAIL 判定，却只报告了其中一部分缺陷，遗漏了另一些。这种"歪打正着"的情况在 TSR 上看不出来，必须用 DRR 单独衡量。
+
+在测试验证领域，**漏检缺陷（False Negative）比误报（False Positive）更危险**：漏掉的缺陷会进入下一个测试阶段，增加后期修复成本；而误报只是多了一次无效排查。
+
+**指标定义**：
+
+```
+DRR = |{已知缺陷 d : Agent报告中提及了 d}| / |所有已知缺陷|
+
+DRR = 1.0  所有缺陷全部被识别（理想）
+DRR < 1.0  存在漏检缺陷，值越低说明报告内容越不完整
+可接受下限：DRR > 0.80（告警线），DRR > 0.90（目标）
+```
+
+**与其他指标的层次关系**：
+
+| 指标 | 评估层次 | 特性 |
+|:---|:---|:---|
+| TSR | 结论层 | 二元（对/错），不区分部分正确 |
+| TED | 路径层 | 工具调用序列是否正确 |
+| Arg-F1 | 参数层 | 工具入参是否准确 |
+| **DRR** | **内容层** | **报告中每条具体缺陷是否被提及（连续值）** |
+
+**实现方式**：
+
+```python
+def compute_defect_recall(
+    agent_report: str,
+    known_defects: list[str],
+) -> tuple[float, list[str]]:
+    """
+    known_defects 示例（TC-0042 Xn切换失败场景）：
+    [
+        "SN Status Transfer 超时",      # 信令层缺陷
+        "Xn 回传链路丢包",              # 传输层缺陷
+        "切换成功率低于基线阈值 99%",   # 性能层缺陷
+    ]
+    """
+    if not known_defects:
+        return 1.0, []  # PASS 场景无已知缺陷，默认满分
+
+    report_lower = agent_report.lower()
+    missed = []
+    for defect in known_defects:
+        # 将缺陷描述拆分为词元，任意词元命中即视为该缺陷被召回
+        tokens = [t for t in defect.lower().split() if len(t) > 2]
+        if not any(tok in report_lower for tok in tokens):
+            missed.append(defect)
+
+    recalled_count = len(known_defects) - len(missed)
+    return recalled_count / len(known_defects), missed
+```
+
+**典型失败案例**：Agent 报告了"SN Status Transfer 超时"（信令层），但未提及"切换成功率低于基线阈值"（性能层回归）。最终 FAIL 判定正确，但测试专家无法从报告中获知性能退化的程度。DRR = 2/3 = 67%，低于告警线。
+
+**为 PASS 场景处理 DRR**：测试通过的场景没有已知缺陷，此时 `known_defects` 为空列表，函数返回满分 1.0，不参与 DRR 均值的计算（在 LangSmith 中返回 `score=None`，平台自动排除空值）。
+
+**质量门禁**：
+
+```
+DRR 告警线：< 90%（提示报告完整性不足）
+DRR 阻断线：< 80%（可能遗漏高危缺陷，禁止发布）
+```
+
 ---
 
 ## 四、评测技术栈实现
