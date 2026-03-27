@@ -29,8 +29,11 @@ LLM 才能将工具结果与对应的调用请求关联起来。这是 OpenAI/De
 """
 
 import json
+import logging
 import math
 import re
+import sys
+import time
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_openai import ChatOpenAI
@@ -44,6 +47,8 @@ from config import (
 )
 from state import AgentState
 from tools import TOOL_MAP, TOOLS
+
+logger = logging.getLogger(__name__)
 
 
 # ── 统计检验工具（纯标准库，无需 scipy）────────────────────────────────────────
@@ -100,6 +105,21 @@ DANGER_KEYWORDS = {
     "wipe",
 }
 
+# ── Clarify prompt ───────────────────────────────────────────────────────────
+CLARIFY_SYSTEM_PROMPT = """你是一个 5G 测试请求分析助手，负责判断用户请求是否足够明确。
+
+明确的请求须包含：
+1. 具体的 5G 功能或场景（例如：切换、NAS 鉴权、波束赋形、漫游、PDCP 压缩等）
+2. 基本测试目标（例如：回归验证、性能基准、端到端连通性）
+
+以下情况视为不明确：
+- 请求过于笼统（如「测试5G」「检查网络」「跑一下测试」）
+- 缺少关键技术参数，导致无法选取测试用例
+
+根据对话历史判断最新用户请求是否明确，返回纯 JSON（不带代码块）：
+{"clear": true/false, "question": "若不明确则填写一个简明的中文澄清问题，否则为空字符串"}"""
+
+
 # ── System prompt ────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """You are a 5G test verification agent. Follow this workflow:
 1. Parse the test request and identify which 5G feature to test.
@@ -132,11 +152,81 @@ def _get_llm(with_tools: bool = True) -> ChatOpenAI:
     return llm.bind_tools(TOOLS) if with_tools else llm
 
 
+def _invoke_with_retry(llm, messages, max_retries: int = 3):
+    """
+    带指数退避的 LLM 调用，自动重试临时性错误（网络抖动、限流等）。
+    第 1/2/3 次失败后分别等待 1s / 2s，第 3 次失败后直接抛出。
+    """
+    for attempt in range(1, max_retries + 1):
+        try:
+            return llm.invoke(messages)
+        except Exception as exc:
+            if attempt == max_retries:
+                logger.error("LLM 调用失败，已重试 %d 次: %s", max_retries, exc)
+                raise
+            wait = 2 ** (attempt - 1)
+            logger.warning(
+                "LLM 调用失败 (第 %d/%d 次): %s，%.0fs 后重试",
+                attempt,
+                max_retries,
+                exc,
+                wait,
+            )
+            time.sleep(wait)
+
+
+# ── Node: clarify ────────────────────────────────────────────────────────────
+def clarify_node(state: AgentState) -> dict:
+    """
+    意图澄清节点（图的入口）。
+
+    用 LLM 判断用户最新请求是否包含足够的 5G 测试信息：
+    - 明确 → 继续执行，needs_clarification=False
+    - 不明确 → 生成澄清问题，图提前结束；主循环负责向用户提问并在下一轮恢复。
+
+    多轮澄清：同一 thread_id 下每次追加新消息重新进入此节点，
+    直到请求足够明确为止。
+    """
+    messages = state["messages"]
+
+    history_lines = []
+    for m in messages:
+        if isinstance(m, HumanMessage):
+            history_lines.append(f"用户: {m.content}")
+        else:
+            content = getattr(m, "content", "")
+            if content:
+                history_lines.append(f"Agent: {content[:200]}")
+
+    history_text = "\n".join(history_lines) or "（无历史）"
+    prompt = f"对话历史：\n{history_text}\n\n请判断用户最新的测试请求是否足够明确。"
+
+    response = _invoke_with_retry(
+        _get_llm(with_tools=False),
+        [SystemMessage(content=CLARIFY_SYSTEM_PROMPT), HumanMessage(content=prompt)],
+    )
+
+    try:
+        data = json.loads(response.content)
+        if not data.get("clear", True):
+            return {
+                "needs_clarification": True,
+                "clarification_question": data.get(
+                    "question", "请描述您具体想测试的 5G 功能和场景。"
+                ),
+                "current_step": "clarify",
+            }
+    except (json.JSONDecodeError, ValueError):
+        logger.warning("clarify: LLM 返回非法 JSON，原始响应: %.200s", response.content)
+
+    return {"needs_clarification": False, "current_step": "clarify"}
+
+
 # ── Node: agent ──────────────────────────────────────────────────────────────
 def agent_node(state: AgentState) -> dict:
     """Main ReAct reasoning node — LLM decides the next action or outputs final verdict."""
     messages = [SystemMessage(content=SYSTEM_PROMPT)] + state["messages"]
-    response = _get_llm(with_tools=True).invoke(messages)
+    response = _invoke_with_retry(_get_llm(with_tools=True), messages)
 
     # Extract confidence_score when the LLM produces its final JSON block
     confidence = state.get("confidence_score", 1.0)
@@ -192,6 +282,10 @@ def tool_node(state: AgentState) -> dict:
             try:
                 result = TOOL_MAP[name].invoke(args)
                 content = json.dumps(result)
+                if name in tool_outputs:
+                    logger.warning(
+                        "tool_outputs: 工具 '%s' 被重复调用，覆盖上次结果", name
+                    )
                 tool_outputs[name] = result  # keyed by tool name; latest call wins
             except Exception as e:
                 content = f"Tool execution error: {e}"
@@ -240,7 +334,7 @@ def _send_webhook_alert(reason: str, state: AgentState) -> None:
             ),
         },
     }
-    print(f"\n[HITL][Webhook] 告警已推送（生产模式将发往 DingTalk）:")
+    print("\n[HITL][Webhook] 告警已推送（生产模式将发往 DingTalk）:")
     print(
         f"  {json.dumps(alert_payload['markdown']['text'][:200], ensure_ascii=False)}"
     )
@@ -276,10 +370,55 @@ def hitl_node(state: AgentState) -> dict:
     # 推送 Webhook 告警（生产：Celery 异步；Demo：直接打印）
     _send_webhook_alert(reason, state)
 
-    print("[HITL] Demo 模式：模拟人工审批通过...")
+    # 终端交互模式：向真实用户请求审批决定
+    if sys.stdin.isatty():
+        print("[HITL] 请审核上述信息，输入决定：")
+        print("  approve — 批准并继续执行")
+        print("  reject  — 拒绝并终止任务")
+        while True:
+            try:
+                action = input("[HITL] 您的决定: ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                action = "reject"
+                print()
+            if action in ("approve", "reject"):
+                break
+            print("  请输入 approve 或 reject")
 
+        if action == "reject":
+            try:
+                feedback = input("[HITL] 拒绝原因（直接回车跳过）: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                feedback = ""
+            print("[HITL] 任务已被人工拒绝。")
+            return {
+                "hitl_required": False,
+                "hitl_rejected": True,
+                "hitl_feedback": feedback or "人工审核拒绝执行。",
+                "confidence_score": 1.0,  # 避免 after_result_judge 再次触发 HITL
+                "error_count": 0,
+                "current_step": "hitl",
+            }
+
+        try:
+            feedback = input("[HITL] 审核意见（直接回车跳过）: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            feedback = ""
+        print("[HITL] 已批准，继续执行。")
+        return {
+            "hitl_required": False,
+            "hitl_rejected": False,
+            "hitl_feedback": feedback or "人工审批通过。",
+            "confidence_score": 0.75,
+            "error_count": 0,
+            "current_step": "agent",
+        }
+
+    # 非终端 / Demo 模式：模拟自动审批
+    print("[HITL] Demo 模式：模拟人工审批通过...")
     return {
         "hitl_required": False,
+        "hitl_rejected": False,
         "hitl_feedback": f"人工审批通过（模拟）。原因：{reason}",
         "confidence_score": 0.75,
         "error_count": 0,
@@ -294,6 +433,23 @@ def result_judge_node(state: AgentState) -> dict:
       Statistical track — KPI threshold checks on cached tool_outputs.
       Semantic track    — LLM synthesises all evidence into a final verdict.
     """
+    # 人工明确拒绝时直接短路，不再调用 LLM
+    if state.get("hitl_rejected", False):
+        return {
+            "final_result": json.dumps(
+                {
+                    "verdict": "REJECTED",
+                    "confidence_score": 1.0,
+                    "stat_verdict": "N/A",
+                    "issues": [],
+                    "root_cause": state.get("hitl_feedback", "人工审核拒绝执行"),
+                },
+                ensure_ascii=False,
+            ),
+            "confidence_score": 1.0,
+            "current_step": "complete",
+        }
+
     tool_outputs = state.get("tool_outputs", {})
 
     # ── Statistical track ────────────────────────────────────────────────────
@@ -379,7 +535,9 @@ def result_judge_node(state: AgentState) -> dict:
         f"Return ONLY valid JSON with no markdown fences:\n"
         f'{{"verdict": "PASS|FAIL|INCONCLUSIVE", "confidence_score": 0.0-1.0, "root_cause": "brief"}}'
     )
-    response = _get_llm(with_tools=False).invoke([HumanMessage(content=prompt)])
+    response = _invoke_with_retry(
+        _get_llm(with_tools=False), [HumanMessage(content=prompt)]
+    )
 
     try:
         data = json.loads(response.content)
@@ -387,6 +545,10 @@ def result_judge_node(state: AgentState) -> dict:
         verdict = data.get("verdict", stat_verdict)
         root_cause = data.get("root_cause", "")
     except (json.JSONDecodeError, ValueError):
+        logger.warning(
+            "result_judge: LLM 返回非法 JSON，降级为统计轨结果。原始响应: %.500s",
+            response.content,
+        )
         confidence = 0.8
         verdict = stat_verdict
         root_cause = "; ".join(stat_issues) if stat_issues else "no issues detected"

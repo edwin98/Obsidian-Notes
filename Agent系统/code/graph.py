@@ -30,12 +30,25 @@ LangSmith 与 LangGraph 的集成：
 
 from langgraph.graph import END, START, StateGraph
 
-from config import CONFIDENCE_LOW, MAX_ERRORS, POSTGRES_URI, RECURSION_LIMIT
-from nodes import agent_node, guardrail_node, hitl_node, result_judge_node, tool_node
+from config import CONFIDENCE_LOW, MAX_ERRORS, POSTGRES_URI
+from nodes import (
+    agent_node,
+    clarify_node,
+    guardrail_node,
+    hitl_node,
+    result_judge_node,
+    tool_node,
+)
 from state import AgentState
 
 
 # ── Routing functions ────────────────────────────────────────────────────────
+
+
+def after_clarify(state: AgentState) -> str:
+    """Route from clarify_node: ambiguous → end（等待用户追问）, clear → agent."""
+    return "end" if state.get("needs_clarification", False) else "agent"
+
 
 def should_continue(state: AgentState) -> str:
     """
@@ -62,6 +75,11 @@ def should_continue(state: AgentState) -> str:
     return "result_judge"
 
 
+def after_hitl(state: AgentState) -> str:
+    """Route from hitl_node: rejected → result_judge（直接输出拒绝结果），otherwise → agent."""
+    return "result_judge" if state.get("hitl_rejected", False) else "agent"
+
+
 def after_guardrail(state: AgentState) -> str:
     """Route from guardrail_node: dangerous op → hitl, safe → tools."""
     return "hitl" if state.get("hitl_required", False) else "tools"
@@ -74,19 +92,26 @@ def after_result_judge(state: AgentState) -> str:
 
 # ── Graph builder ────────────────────────────────────────────────────────────
 
+
 def _build_workflow() -> StateGraph:
     # StateGraph(AgentState)：以 AgentState 作为整张图共享的状态结构
     workflow = StateGraph(AgentState)
 
     # 注册节点：每个节点是一个普通 Python 函数 (state: AgentState) -> dict
+    workflow.add_node("clarify", clarify_node)
     workflow.add_node("agent", agent_node)
     workflow.add_node("guardrail", guardrail_node)
     workflow.add_node("tools", tool_node)
     workflow.add_node("hitl", hitl_node)
     workflow.add_node("result_judge", result_judge_node)
 
-    # 固定入口：START 是 LangGraph 内置的虚拟起始节点
-    workflow.add_edge(START, "agent")
+    # 固定入口：先经过意图澄清节点
+    workflow.add_edge(START, "clarify")
+    workflow.add_conditional_edges(
+        "clarify",
+        after_clarify,
+        {"agent": "agent", "end": END},
+    )
 
     # 条件边：路由函数返回字符串 key，mapping 将 key 映射到目标节点名
     workflow.add_conditional_edges(
@@ -101,8 +126,12 @@ def _build_workflow() -> StateGraph:
     )
     # 固定边：工具执行完毕后无条件返回 agent 继续推理（ReAct 循环）
     workflow.add_edge("tools", "agent")
-    # HITL 完成后重回 agent，带着人工反馈继续执行
-    workflow.add_edge("hitl", "agent")
+    # HITL 完成后：批准 → agent 继续；拒绝 → result_judge 直接输出 REJECTED
+    workflow.add_conditional_edges(
+        "hitl",
+        after_hitl,
+        {"agent": "agent", "result_judge": "result_judge"},
+    )
     workflow.add_conditional_edges(
         "result_judge",
         after_result_judge,

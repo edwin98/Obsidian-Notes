@@ -1,4 +1,5 @@
 import random
+import uuid
 
 from langchain_core.tools import tool
 
@@ -41,7 +42,13 @@ def simulation_runner(test_case_ids: list, env: str = "sandbox") -> dict:
     }
     pass_count = sum(1 for r in results.values() if r["status"] == "PASS")
     pass_rate = pass_count / len(results) if results else 0.0
-    return {"env": env, "results": results, "pass_rate": round(pass_rate, 4)}
+    session_id = f"sim-{uuid.uuid4().hex[:8]}"
+    return {
+        "session_id": session_id,
+        "env": env,
+        "results": results,
+        "pass_rate": round(pass_rate, 4),
+    }
 
 
 @tool

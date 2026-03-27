@@ -32,7 +32,9 @@ DEEPSEEK_MODEL: str = "deepseek-chat"
 # setdefault：若环境变量已由 .env 设置则不覆盖，否则使用默认值
 os.environ.setdefault("LANGCHAIN_TRACING_V2", os.getenv("LANGCHAIN_TRACING_V2", "true"))
 os.environ.setdefault("LANGCHAIN_API_KEY", os.getenv("LANGSMITH_API_KEY", ""))
-os.environ.setdefault("LANGCHAIN_PROJECT", os.getenv("LANGSMITH_PROJECT", "5g-test-agent"))
+os.environ.setdefault(
+    "LANGCHAIN_PROJECT", os.getenv("LANGSMITH_PROJECT", "5g-test-agent")
+)
 
 # ── PostgreSQL Checkpoint ────────────────────────────────────────────────────
 # LangGraph 用 Checkpointer 将每一步的 AgentState 序列化并持久化。
@@ -44,6 +46,6 @@ POSTGRES_URI: str = os.getenv(
 
 # ── Agent 熔断阈值 ───────────────────────────────────────────────────────────
 CONFIDENCE_HIGH: float = 0.85  # 自动结论，无需人工审核
-CONFIDENCE_LOW: float = 0.65   # 低于此值触发 HITL（软熔断）
-MAX_ERRORS: int = 2            # 连续工具错误次数上限（软熔断）
-RECURSION_LIMIT: int = 15      # 图最大迭代轮次（硬熔断，由 LangGraph 强制）
+CONFIDENCE_LOW: float = 0.65  # 低于此值触发 HITL（软熔断）
+MAX_ERRORS: int = 2  # 连续工具错误次数上限（软熔断）
+RECURSION_LIMIT: int = 25  # 图最大迭代轮次（硬熔断，由 LangGraph 强制）
