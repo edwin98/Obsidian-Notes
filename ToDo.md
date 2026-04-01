@@ -48,3 +48,12 @@ agent系统，查阅测试用例的时候，是否有一些典型的测试用例
 embedding、reranker微调的时候，走过哪些弯路，如果重新做一次要怎么做
 agent系统，查阅测试用例的时候，是否有一些典型的测试用例，能不能举例说明一下，测试用例是如何存储的模型在agent中具体负责什么，是否参与用例的生成
 rag、agent模型评测的时候，哪些评测指标有llm的参与
+agent系统中，每个message是怎样的结构
+agent系统中，llm对于代码仅做了rag查找吗？是否可以做一些后训练以增强其代码的生成效果
+multi token prediction是怎么实现的
+kv cache的时间复杂度降低
+微调3B模型的时候的空间占用评估，kv对占其中多大部分
+如何处理cot时正确率上升，但是时间变长的问题
+为什么不能用es数据库去检索向量
+user prompt和system prompt的区别是什么，agent系统中，哪些要放在user prompt中
+千问3的归一化是怎么做的

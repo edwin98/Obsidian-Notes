@@ -621,12 +621,12 @@ Listwise Softmax Loss 的梯度需要同时流过所有 (query, doc) pair 的 to
 
 **硬件配置：**
 
-| 资源 | 规格 | 说明 |
-|------|------|------|
-| GPU | 2× NVIDIA A10G（24 GB VRAM × 2） | 单机双卡，数据并行（DDP） |
-| CPU | 32 核 Intel Xeon | DataLoader 预处理，多进程 tokenization |
-| 内存 | 128 GB RAM | 训练集全量加载至内存，消除磁盘 I/O 瓶颈 |
-| 存储 | 1 TB NVMe SSD | checkpoint 存储、tokenized 数据缓存 |
+| 资源  | 规格                             | 说明                              |
+| --- | ------------------------------ | ------------------------------- |
+| GPU | 2× NVIDIA A10G（24 GB VRAM × 2） | 单机双卡，数据并行（DDP）                  |
+| CPU | 32 核 Intel Xeon                | DataLoader 预处理，多进程 tokenization |
+| 内存  | 128 GB RAM                     | 训练集全量加载至内存，消除磁盘 I/O 瓶颈          |
+| 存储  | 1 TB NVMe SSD                  | checkpoint 存储、tokenized 数据缓存    |
 
 **训练框架栈：**
 
