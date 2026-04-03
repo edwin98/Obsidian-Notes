@@ -5,7 +5,7 @@
       <sourceFolder url="file://$MODULE_DIR$/RAG系统/code" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/.venv" />
     </content>
-    <orderEntry type="jdk" jdkName="uv (Obsidian Vault)" jdkType="Python SDK" />
+    <orderEntry type="jdk" jdkName="uv (Obsidian-Notes)" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />
   </component>
 </module>
