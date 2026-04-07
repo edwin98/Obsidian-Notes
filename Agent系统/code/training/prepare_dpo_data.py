@@ -27,8 +27,10 @@ prepare_dpo_data.py — 从 HITL 记录构建 DPO 偏好数据
 """
 
 import argparse
+import asyncio
 import json
 import random
+import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Optional
@@ -380,6 +382,178 @@ def generate_synthetic_dpo_data(target_count: int = 1200) -> list[DPOSample]:
     return samples
 
 
+# ── 冷启动偏好数据生成（HITL 数据不足时使用）─────────────────────────────────────
+#
+# 背景（笔记 §4.2 Q5）：生产初期 HITL 数据稀少，无法直接训练 DPO。
+# 临时方案是用强 LLM 为同一任务生成"安全版本"和"危险版本"，再由专家确认优劣。
+# 本函数将此方案系统化，集成进标准流水线（--cold_start 参数触发）。
+#
+# 流程：
+#   1. 从预定义的高风险场景模板中取一批 prompt
+#   2. 调用强 LLM 为每个 prompt 生成 3 个候选回复（高/中/低安全级别）
+#   3. 用规则化安全评分器自动标注 chosen/rejected
+#   4. 可选：将结果保存为待专家审核的文件，人工确认后才入库
+#
+# 与合成数据的区别：冷启动数据专门针对安全边界场景，
+# 而 generate_synthetic_dpo_data 只是对已有模板的随机变化。
+
+COLD_START_SCENARIOS = [
+    "对所有 gNB 同时做全量压测，验证极限并发下的系统稳定性",
+    "删除所有历史测试基线，重新建立新的 KPI 参考值",
+    "重启整个测试集群中的所有 gNB，验证批量重启后的接入成功率",
+    "对生产网络中的 UE 发起强制切换，测试 A3 事件触发精度",
+    "持续监测基站信号质量直到完全稳定，不设超时限制",
+    "使用 5000 个并发 UE 测试高密度接入场景",
+    "清除所有 RLC/PDCP 计数器后执行吞吐量测试",
+    "在受限频段（698-862MHz）内发起干扰抑制测试",
+]
+
+COLD_START_GENERATION_PROMPT = """你是一位 5G 测试验证 Agent，请为以下测试请求生成两个版本的回复：
+
+测试请求：{user_input}
+
+版本A（不安全版本）：包含以下任意一种问题：
+  - 危险操作（reset_all/force_reboot/clear_all_counters）
+  - 参数越界（并发数 > 100、UE 数量 > 50）
+  - 无终止条件的循环
+  - 使用受限频段
+
+版本B（安全版本）：遵守以下约束：
+  - 使用细粒度、可回滚的等价操作代替危险操作
+  - 所有参数在平台允许范围内
+  - 设置明确的迭代上限和超时
+  - 使用合法的实验频段（2.6GHz / 3.5GHz）
+  - 最终输出严格 JSON：confidence_score + verdict + summary
+
+严格按 JSON 格式输出（不要加任何说明）：
+{{
+  "unsafe_version": "<版本A的完整 ReAct 对话>",
+  "safe_version": "<版本B的完整 ReAct 对话>",
+  "risk_type": "<直接高危|隐性高危|参数越界|频段错误>",
+  "risk_explanation": "<一句话说明版本A的风险>"
+}}"""
+
+
+# 规则化安全评分器（不依赖 API，纯本地规则）
+FORBIDDEN_PATTERNS = [
+    "reset_all", "force_reboot", "clear_all_counters", "delete_baseline",
+    "concurrency.*[5-9][0-9]{2,}",   # concurrency >= 500
+    "ue_count.*[5-9][0-9]{1,}",      # ue_count >= 50+
+    "while True", "infinite", "无限",
+    "698MHz", "862MHz",               # 受限频段
+]
+
+
+def rule_based_safety_score(text: str) -> float:
+    """
+    纯规则的安全评分，0.0 = 危险，1.0 = 安全。
+    不依赖任何外部 API，可在无网络环境下运行。
+    """
+    text_lower = text.lower()
+    for pattern in FORBIDDEN_PATTERNS:
+        if re.search(pattern, text_lower):
+            return 0.0
+    return 1.0
+
+
+async def generate_cold_start_pair(
+    client,
+    semaphore: asyncio.Semaphore,
+    user_input: str,
+) -> Optional[DPOSample]:
+    """
+    为单条冷启动场景生成一个 (chosen, rejected) 偏好对。
+    先调用强 LLM 生成两个版本，再用规则评分器验证分配是否正确。
+    """
+    async with semaphore:
+        prompt = COLD_START_GENERATION_PROMPT.format(user_input=user_input)
+        try:
+            response = await client.chat.completions.create(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7,
+                max_tokens=2000,
+            )
+            raw = response.choices[0].message.content.strip()
+            match = re.search(r"\{.*\}", raw, re.DOTALL)
+            if not match:
+                return None
+            result = json.loads(match.group())
+
+            unsafe_text = result.get("unsafe_version", "")
+            safe_text = result.get("safe_version", "")
+
+            # 用规则评分器交叉验证：确保 unsafe 确实不安全、safe 确实安全
+            # 若强 LLM 生成的两个版本规则评分相同，说明区分不够明确，丢弃此样本
+            unsafe_score = rule_based_safety_score(unsafe_text)
+            safe_score = rule_based_safety_score(safe_text)
+            if unsafe_score >= 0.5 or safe_score < 0.5:
+                # unsafe 看起来是安全的 或 safe 看起来是危险的，说明生成质量差
+                return None
+
+            dpo_prompt = (
+                f"<|im_start|>system\n{SYSTEM_PROMPT}<|im_end|>\n"
+                f"<|im_start|>user\n{user_input}<|im_end|>\n"
+                f"<|im_start|>assistant\n"
+            )
+            return DPOSample(
+                prompt=dpo_prompt,
+                chosen=safe_text,
+                rejected=unsafe_text,
+                preference_type=result.get("risk_type", "冷启动合成"),
+                hitl_id=f"cold_start_{hash(user_input) % 100000:05d}",
+                expert_rationale=result.get("risk_explanation", ""),
+            )
+        except Exception as e:
+            print(f"[ColdStart] 生成失败 ({user_input[:30]}...): {e}")
+            return None
+
+
+async def generate_cold_start_dpo_data(
+    api_key: str,
+    base_url: Optional[str] = None,
+    target_count: int = 500,
+    concurrency: int = 5,
+) -> list[DPOSample]:
+    """
+    冷启动 DPO 数据生成主函数。
+
+    参数：
+      target_count：目标生成数量（通过对场景模板重复采样达到）
+      concurrency：并发 API 调用数（防止 API 限流）
+
+    与 generate_synthetic_dpo_data 的区别：
+      - 合成数据：对固定模板做文本变体，多样性有限
+      - 冷启动数据：让强 LLM 自由生成两种安全级别的版本，覆盖更多边界情况
+      - 冷启动数据会经过规则评分器验证，质量更可靠
+
+    建议：冷启动数据生成后，导出为 JSONL 供领域专家抽检（10% 比例），
+    确认无误后再用于 DPO 训练。
+    """
+    from openai import AsyncOpenAI
+    client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+    semaphore = asyncio.Semaphore(concurrency)
+
+    # 对场景模板循环采样直到达到目标数量
+    tasks = []
+    for i in range(target_count):
+        scenario = COLD_START_SCENARIOS[i % len(COLD_START_SCENARIOS)]
+        # 加入小变体避免重复（轻微改写，让 LLM 生成不同版本）
+        variants = [scenario, f"请立即{scenario}", f"{scenario}（紧急需求）"]
+        user_input = variants[i % len(variants)]
+        tasks.append(generate_cold_start_pair(client, semaphore, user_input))
+
+    print(f"[ColdStart] 开始生成 {target_count} 条冷启动偏好数据...")
+    results = await asyncio.gather(*tasks)
+    samples = [r for r in results if r is not None]
+
+    valid_rate = len(samples) / target_count * 100
+    print(f"[ColdStart] 完成: {len(samples)}/{target_count} 条有效 ({valid_rate:.1f}%)")
+    if valid_rate < 50:
+        print("[ColdStart][WARNING] 有效率低于 50%，建议检查 API 返回质量或调整 prompt")
+    return samples
+
+
 # ── 主流程 ───────────────────────────────────────────────────────────────────
 
 def parse_args():
@@ -392,6 +566,14 @@ def parse_args():
                         help="使用合成偏好数据（学习演示用）")
     parser.add_argument("--synthetic_count", type=int, default=1200,
                         help="合成数据数量（笔记 §4.2：约 1.2 万对）")
+    parser.add_argument("--cold_start", action="store_true",
+                        help="冷启动模式：HITL 数据不足时用强 LLM 自动生成偏好对（需要 --api_key）")
+    parser.add_argument("--cold_start_count", type=int, default=500,
+                        help="冷启动模式生成的目标样本数量（建议 500-2000，后续用真实 HITL 数据补充）")
+    parser.add_argument("--api_key", default=None,
+                        help="OpenAI/DeepSeek API Key（冷启动模式必需）")
+    parser.add_argument("--api_base_url", default=None,
+                        help="API Base URL（使用 DeepSeek 等替代模型时设置）")
     parser.add_argument("--output_file", default="data/dpo_raw.jsonl")
     return parser.parse_args()
 
@@ -405,7 +587,21 @@ def main():
 
     dpo_samples: list[DPOSample] = []
 
-    if args.use_synthetic:
+    if args.cold_start:
+        # 冷启动模式：HITL 数据不足时用强 LLM 自动生成偏好对
+        if not args.api_key:
+            print("[ERROR] 冷启动模式需要 --api_key 参数")
+            return
+        print(f"[模式] 冷启动数据生成（目标 {args.cold_start_count} 条）")
+        print("  适用场景：生产初期 HITL 数据 < 200 条，DPO 训练数据不足")
+        print("  生成后建议：导出结果供专家抽检 10% 样本，确认质量后再用于训练\n")
+        dpo_samples = asyncio.run(generate_cold_start_dpo_data(
+            api_key=args.api_key,
+            base_url=args.api_base_url,
+            target_count=args.cold_start_count,
+        ))
+
+    elif args.use_synthetic:
         # 合成模式（学习 Demo）
         print("[模式] 合成数据（学习演示）")
         dpo_samples = generate_synthetic_dpo_data(args.synthetic_count)

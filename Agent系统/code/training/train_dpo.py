@@ -18,15 +18,18 @@ DPO 损失函数直觉：
   → β 控制对 Reference Model 的偏离程度（防止遗忘 SFT 能力）
 
 Reference Model 选取（笔记 §4.3）：
-  使用 SFT 完成后的 Qwen3-32B-5G-SFT 作为 Reference，而非基座模型。
+  使用 SFT merge 后的完整模型（checkpoints/sft/merged）作为 Reference，而非基座模型。
   原因：Reference 若是基座，DPO 会同时对抗基座和 SFT 的影响，导致 SFT 格式能力退化。
 
-运行方式（8 卡 A100）：
+运行方式（8 卡 A100 80G）：
   deepspeed --num_gpus=8 train_dpo.py \
     --deepspeed deepspeed_config.json \
-    --sft_model_path checkpoints/sft/final \
+    --sft_model_path checkpoints/sft/merged \
     --data_path data/dpo_clean.jsonl \
     --output_dir checkpoints/dpo
+
+训练完成后会自动 merge LoRA 权重并保存完整模型至 checkpoints/dpo/merged，
+可直接用 vLLM 部署。
 """
 
 import argparse
@@ -35,8 +38,8 @@ from pathlib import Path
 
 import torch
 from datasets import Dataset
-from peft import LoraConfig, TaskType, get_peft_model, prepare_model_for_kbit_training
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from peft import LoraConfig, TaskType, get_peft_model
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import DPOConfig, DPOTrainer
 
 # ── 参数解析 ─────────────────────────────────────────────────────────────────
@@ -73,16 +76,13 @@ def parse_args():
 
 def load_model_and_tokenizer(model_path: str):
     """
-    加载 SFT 模型作为 DPO 的 Policy Model。
+    加载 SFT merged 模型作为 DPO 的 Policy Model 起点。
 
     重要细节：
+    - 输入为 SFT 阶段 merge_and_unload() 后的完整 BF16 模型（无 LoRA adapter）
     - DPO 需要同时维护 Policy Model（可训）和 Reference Model（冻结）
     - TRL DPOTrainer 在内部自动创建 Reference Model（深拷贝 Policy 并冻结）
-    - 因此我们只需要加载一个模型实例
-
-    量化配置与 SFT 相同，但注意：
-    - DPO 的 beta 参数需要同时对 policy 和 reference 的 log probs 进行精确计算
-    - 量化可能带来轻微精度损失，但对最终效果影响可忽略（实验证明）
+    - 因此我们只需要加载一个模型实例，DPO 阶段再套新的 LoRA adapter
     """
     tokenizer = AutoTokenizer.from_pretrained(
         model_path,
@@ -92,22 +92,16 @@ def load_model_and_tokenizer(model_path: str):
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # DPO 训练的量化配置（同 SFT）
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.bfloat16,
-        bnb_4bit_use_double_quant=True,
-    )
-
+    # DeepSpeed ZeRO-3 与 device_map 不兼容，同 train_sft.py 的原因。
+    # DPO 阶段同样由 DeepSpeed 接管分片，不设置 device_map。
+    # 单卡调试时取消注释 device_map="cuda:0"。
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
-        quantization_config=bnb_config,
-        device_map="auto",
         trust_remote_code=True,
         torch_dtype=torch.bfloat16,
+        low_cpu_mem_usage=True,
+        # device_map="cuda:0",  # 单卡调试时取消注释
     )
-    model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)
     return model, tokenizer
 
 
@@ -321,18 +315,26 @@ def main():
 
     trainer.train()
 
-    # 保存最终模型
-    final_output = Path(args.output_dir) / "final"
-    model.save_pretrained(str(final_output))
-    tokenizer.save_pretrained(str(final_output))
+    # 保存 LoRA adapter 权重
+    lora_output = Path(args.output_dir) / "lora_adapter"
+    model.save_pretrained(str(lora_output))
+    tokenizer.save_pretrained(str(lora_output))
+    print(f"\n[完成] DPO LoRA adapter 已保存至 {lora_output}")
 
-    print(f"\n[完成] DPO 模型已保存至 {final_output}")
+    # Merge LoRA 权重到基础模型，输出完整 BF16 模型供 vLLM 部署
+    print("[Merge] 将 DPO LoRA 权重 merge 到模型...")
+    merged_model = model.merge_and_unload()
+    merged_output = Path(args.output_dir) / "merged"
+    merged_model.save_pretrained(str(merged_output))
+    tokenizer.save_pretrained(str(merged_output))
+
+    print(f"[完成] DPO Merged 模型已保存至 {merged_output}")
     print(f"\n预期效果（笔记 §4.4）：")
     print(f"  高危场景阻断率: 72.4% → 96.8%（+24.4pp）")
     print(f"  任务完成率:     83.6% → 88.0%（+4.4pp）")
     print(f"  格式合规率:     96.7% → 96.1%（-0.6pp，可接受退化）")
     print(f"\n[提示] 下一步：")
-    print(f"  1. 用 vLLM 部署: vllm serve {final_output} --enable-lora")
+    print(f"  1. 用 vLLM 部署: vllm serve {merged_output}")
     print(f"  2. 结合 Guardrail 节点（nodes.py）达到 100% 高危场景阻断")
     print(f"  3. 新的 HITL 数据持续积累 → 下周增量 DPO → 学习飞轮")
 

@@ -242,6 +242,110 @@ async def generate_dialog(
             return None
 
 
+# ── Step 2.5：LLM-as-Judge 推理链质量过滤 ────────────────────────────────────────
+#
+# 背景：Pydantic 格式校验只能发现格式问题，但无法识别"格式正确、逻辑错误"的样本，
+# 例如：工具调用顺序颠倒（先 simulation_runner 再 test_case_query）、
+#       凭空捏造工具返回值、Thought 推理与 Action 不一致等。
+# 这类样本进入训练集会让模型学到错误的推理模式，危害比格式错误更大。
+#
+# 做法：用强 LLM 对每条生成的对话打一个 reasoning_quality_score（0-10），
+# 低于阈值（默认 6）的样本直接丢弃，不进入后续流水线。
+# 代价：每条样本额外消耗约 500 token 的 API 调用，但过滤掉的低质量样本
+# 通常占 10-20%，最终提升训练数据的平均质量。
+
+JUDGE_PROMPT = """你是一位严格的 5G 测试 Agent 训练数据质量评审专家。
+
+请对以下 Agent 生成的对话按照 ReAct 推理范式评分（0-10 分）：
+
+【评分维度】
+1. 工具调用顺序是否合理（必须先 test_case_query，再 simulation_runner）
+2. 工具参数是否来自前一步的真实返回值（不能凭空捏造参数值）
+3. Thought 推理是否与后续 Action 逻辑一致（推理要支撑行动）
+4. 最终 JSON 结论是否完整（confidence_score + verdict + summary 三项必须齐全）
+5. 是否有危险操作（reset_all/force_reboot/超大并发等）未被识别
+
+【对话内容】
+场景类型：{scenario}
+用户请求：{user_input}
+Agent 回复：
+{dialog}
+
+【输出格式】
+严格输出 JSON，不要加任何说明：
+{{"score": <0-10的整数>, "reason": "<一句话说明扣分原因，满分时写'推理链完整正确'>"}}"""
+
+
+async def judge_dialog_quality(
+    client: AsyncOpenAI,
+    semaphore: asyncio.Semaphore,
+    dialog_record: dict,
+    threshold: float = 6.0,
+) -> tuple[dict, bool]:
+    """
+    用强 LLM 对生成的对话进行推理链质量评估。
+
+    返回值：(dialog_record_with_score, is_pass)
+      - dialog_record_with_score：原记录 + reasoning_quality_score 字段
+      - is_pass：是否通过质量门禁（score >= threshold）
+
+    注意：Judge 调用使用较低的 temperature（0.1），确保评分稳定可复现。
+    API 失败时默认放行（避免因 API 不稳定导致大量数据被误丢弃）。
+    """
+    async with semaphore:
+        prompt = JUDGE_PROMPT.format(
+            scenario=dialog_record["scenario"],
+            user_input=dialog_record["user_input"],
+            dialog=dialog_record["raw_dialog"][:2000],  # 截断超长对话，节省 token
+        )
+        try:
+            response = await client.chat.completions.create(
+                model=STRONG_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.1,   # 低温度保证评分稳定
+                max_tokens=200,
+            )
+            raw = response.choices[0].message.content.strip()
+            match = re.search(r"\{.*\}", raw, re.DOTALL)
+            if match:
+                result = json.loads(match.group())
+                score = float(result.get("score", 0))
+                dialog_record["reasoning_quality_score"] = score
+                dialog_record["judge_reason"] = result.get("reason", "")
+                return dialog_record, score >= threshold
+        except Exception as e:
+            print(f"[Judge] 评分失败，默认放行: {e}")
+        # API 失败时给一个中间分，放行但标记
+        dialog_record["reasoning_quality_score"] = -1
+        dialog_record["judge_reason"] = "judge_api_failed"
+        return dialog_record, True
+
+
+async def filter_by_quality(
+    client: AsyncOpenAI,
+    semaphore: asyncio.Semaphore,
+    dialogs: list[dict],
+    threshold: float = 6.0,
+) -> list[dict]:
+    """
+    对批量对话并发调用 LLM-as-Judge，过滤低质量样本。
+    """
+    tasks = [
+        judge_dialog_quality(client, semaphore, d, threshold)
+        for d in dialogs
+    ]
+    results = await asyncio.gather(*tasks)
+
+    passed = [d for d, ok in results if ok]
+    failed_count = len(dialogs) - len(passed)
+    api_failed = sum(1 for d, _ in results if d.get("reasoning_quality_score") == -1)
+
+    print(f"[LLM-as-Judge] 总计: {len(dialogs)} | 通过: {len(passed)} | "
+          f"过滤: {failed_count} ({failed_count/len(dialogs)*100:.1f}%) | "
+          f"API 失败放行: {api_failed}")
+    return passed
+
+
 # ── Step 3：打包为 ChatML 格式 ─────────────────────────────────────────────────
 
 SYSTEM_PROMPT = """You are a 5G test verification agent. Follow the ReAct framework:
@@ -368,6 +472,11 @@ async def main():
         print(f"  进度: {min(i + BATCH_SIZE, len(dialog_tasks))}/{len(dialog_tasks)}")
 
     print(f"[Step 2] 生成对话 {len(raw_dialogs)} 条")
+
+    # ── Step 2.5：LLM-as-Judge 质量过滤 ──────────────────────────────────
+    print("\n[Step 2.5] LLM-as-Judge 推理链质量过滤（阈值 score >= 6）...")
+    raw_dialogs = await filter_by_quality(client, semaphore, raw_dialogs, threshold=6.0)
+    print(f"[Step 2.5] 过滤后剩余 {len(raw_dialogs)} 条高质量对话")
 
     # ── Step 3：打包为 ChatML 格式 ────────────────────────────────────────────
     print("\n[Step 3] 打包为 ChatML 格式...")

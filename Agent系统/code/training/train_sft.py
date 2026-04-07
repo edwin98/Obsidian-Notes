@@ -1,5 +1,5 @@
 """
-train_sft.py — Qwen3-32B QLoRA 监督微调（SFT）
+train_sft.py — Qwen3-32B LoRA 监督微调（SFT）
 
 训练目标（笔记 §1.2 的结论）：
   RAG 和 Prompt 解决"给模型提供信息"，SFT 解决"改变模型行为模式"。
@@ -10,23 +10,27 @@ train_sft.py — Qwen3-32B QLoRA 监督微调（SFT）
     4. 面对工具失败时的容错行为（重试、降级、触发 HITL）
 
 模型选型（笔记 §3.3）：
-  Qwen3-32B + QLoRA（而非 Full Fine-Tuning）
+  Qwen3-32B + LoRA（BF16，而非 Full Fine-Tuning 或 QLoRA）
   原因：
     - 32B 在通信领域逻辑推理上已足够，更大模型边际收益有限
-    - 全参微调需要 ~2TB 显存；QLoRA 仅需 ~80GB（1×A100 可加载）
-    - QLoRA 通过冻结基础权重，通用能力不受损（防止灾难性遗忘）
+    - 全参微调需要 ~2TB 显存；LoRA 仅需多卡 BF16 加载（DeepSpeed ZeRO-3 分片）
+    - LoRA 通过冻结基础权重，通用能力不受损（防止灾难性遗忘）
+    - 选 LoRA 而非 QLoRA：避免量化精度损失，训练结束后直接 merge 权重供 DPO 使用
 
 训练配置（笔记 §3.4）：
   LoRA: r=64, alpha=128, dropout=0.05
   优化器: AdamW + Cosine LR Decay (5e-5)
-  批次: per_device=2, gradient_accum=8 → 等效 batch=128（8×A100）
+  批次: per_device=2, gradient_accum=8 → 等效 batch=128（8×A100 80G）
   DeepSpeed: ZeRO-3 + CPU 卸载
 
-运行方式（8 卡 A100）：
+运行方式（8 卡 A100 80G）：
   deepspeed --num_gpus=8 train_sft.py \
     --deepspeed deepspeed_config.json \
     --data_path data/sft_clean.jsonl \
     --output_dir checkpoints/sft
+
+训练完成后会自动 merge LoRA 权重并保存完整模型至 checkpoints/sft/merged，
+供后续 train_dpo.py 直接加载。
 """
 
 import argparse
@@ -35,11 +39,10 @@ from pathlib import Path
 
 import torch
 from datasets import Dataset
-from peft import LoraConfig, TaskType, get_peft_model, prepare_model_for_kbit_training
+from peft import LoraConfig, TaskType, get_peft_model
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
-    BitsAndBytesConfig,
     TrainerCallback,
     TrainingArguments,
 )
@@ -48,7 +51,7 @@ from trl import SFTTrainer
 # ── 参数解析 ─────────────────────────────────────────────────────────────────
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Qwen3-32B QLoRA SFT 训练")
+    parser = argparse.ArgumentParser(description="Qwen3-32B LoRA SFT 训练")
     parser.add_argument("--model_name_or_path", default="Qwen/Qwen3-32B",
                         help="基础模型路径（HuggingFace Hub ID 或本地路径）")
     parser.add_argument("--data_path", default="data/sft_clean.jsonl",
@@ -68,29 +71,6 @@ def parse_args():
     parser.add_argument("--hard_sample_upweight", type=float, default=2.0,
                         help="第 3 个 Epoch 对难例的上采样倍率（笔记 §3.6）")
     return parser.parse_args()
-
-
-# ── 量化配置 ─────────────────────────────────────────────────────────────────
-
-def get_bnb_config() -> BitsAndBytesConfig:
-    """
-    QLoRA 量化配置（笔记 §3.3）：
-
-    load_in_4bit=True：将基础模型加载为 4-bit 量化形式，大幅节省显存。
-    nf4（NormalFloat4）：比 int4 更适合正态分布的模型权重（LLM 权重近似正态分布），
-      精度损失更小。
-    bfloat16：量化时（反量化计算）使用 BF16，相比 FP16 数值范围更大，不容易溢出。
-    double_quant：对量化参数本身再量化，进一步节省约 0.4 bits/参数。
-
-    整体效果：32B 模型原本 BF16 需要 64GB，4-bit 量化后约 18GB，
-    加上激活值和优化器状态，A100 80G 可以舒适地运行。
-    """
-    return BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.bfloat16,
-        bnb_4bit_use_double_quant=True,   # 双重量化：量化参数也量化一次
-    )
 
 
 # ── LoRA 配置 ─────────────────────────────────────────────────────────────────
@@ -358,13 +338,136 @@ def upsample_hard_examples(
     return Dataset.from_list(upsampled_list)
 
 
+# ── 置信度阈值自动重校准（笔记"近期改"第3条）────────────────────────────────────────
+#
+# 背景：系统硬编码了 confidence_score < 0.65 触发 HITL 的阈值。
+# 但模型每次更新后，其置信度分布会发生漂移：
+#   - SFT 后模型倾向于高置信度输出
+#   - DPO 后模型对危险场景的置信度会主动降低
+# 如果不重新校准，固定阈值会导致：
+#   - 阈值偏高 → HITL 触发过于频繁，人工审核负担增加
+#   - 阈值偏低 → 部分不确定的输出绕过 HITL，安全风险升高
+#
+# 校准方法：
+#   1. 在验证集上跑一遍模型，收集每条样本的 (confidence_score, is_correct) 对
+#   2. 找出"错误率急剧上升的相变点"（即 confidence_score 从哪个值开始错误率 > 15%）
+#   3. 该相变点即为新阈值
+#
+# 使用方式：在 SFT/DPO 训练完成后调用本函数，将返回值写入 Agent 系统配置。
+
+
+def calibrate_confidence_threshold(
+    model,
+    tokenizer,
+    eval_dataset,
+    error_rate_threshold: float = 0.15,
+    score_bins: int = 20,
+) -> float:
+    """
+    在验证集上自动校准置信度阈值。
+
+    参数：
+      error_rate_threshold：允许的最大错误率。当某个置信度区间的错误率超过此值时，
+                           该区间对应的置信度上界即为新阈值。默认 15%。
+      score_bins：将 [0, 1] 区间划分为多少个桶（精度越高，需要的样本量越大）。
+
+    返回：
+      新的置信度阈值（float），建议写入 Agent 配置文件。
+
+    注意：
+      eval_dataset 中的样本需要包含 "expected_verdict" 字段（PASS/FAIL/INCONCLUSIVE），
+      用于判断模型输出是否正确。若验证集没有此字段，本函数返回默认值 0.65。
+    """
+    import numpy as np
+
+    model.eval()
+    bin_width = 1.0 / score_bins
+
+    # 每个 bin：[correct_count, total_count]
+    bins = [[0, 0] for _ in range(score_bins)]
+
+    print(f"\n[置信度校准] 在验证集上评估 {len(eval_dataset)} 条样本...")
+
+    with torch.no_grad():
+        for sample in eval_dataset:
+            if "expected_verdict" not in sample:
+                continue  # 跳过无 ground truth 的样本
+
+            # 推理：生成模型输出
+            messages = sample.get("messages", [])
+            if not messages:
+                continue
+
+            prompt_text = tokenizer.apply_chat_template(
+                messages[:-1],  # 去掉最后的 assistant 轮
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            inputs = tokenizer(prompt_text, return_tensors="pt").to(model.device)
+            output_ids = model.generate(
+                **inputs,
+                max_new_tokens=512,
+                temperature=0.1,
+                do_sample=False,
+            )
+            generated = tokenizer.decode(
+                output_ids[0][inputs["input_ids"].shape[1]:],
+                skip_special_tokens=True,
+            )
+
+            # 从生成文本中提取 confidence_score
+            import re as _re
+            score_match = _re.search(r'"confidence_score"\s*:\s*([0-9.]+)', generated)
+            verdict_match = _re.search(r'"verdict"\s*:\s*"(\w+)"', generated)
+
+            if not score_match or not verdict_match:
+                continue
+
+            confidence = float(score_match.group(1))
+            predicted_verdict = verdict_match.group(1).upper()
+            expected_verdict = sample["expected_verdict"].upper()
+
+            is_correct = (predicted_verdict == expected_verdict)
+            bin_idx = min(int(confidence / bin_width), score_bins - 1)
+            bins[bin_idx][1] += 1
+            if is_correct:
+                bins[bin_idx][0] += 1
+
+    # 从低置信度到高置信度，找第一个错误率 < error_rate_threshold 的相变点
+    # 逻辑：错误率高于阈值的区间 → 需要 HITL 介入；低于阈值的区间 → 可以自主执行
+    new_threshold = 0.65  # 默认值（若数据不足则保守回退）
+    for i in range(score_bins):
+        total = bins[i][1]
+        if total < 5:
+            continue  # 样本量不足，跳过此 bin
+        error_rate = 1.0 - bins[i][0] / total
+        bin_lower = i * bin_width
+        bin_upper = (i + 1) * bin_width
+        if error_rate <= error_rate_threshold:
+            # 从这个 bin 开始，错误率可接受，新阈值 = 这个 bin 的下界
+            new_threshold = round(bin_lower, 2)
+            print(f"  [校准] confidence >= {new_threshold:.2f} 时错误率 {error_rate*100:.1f}% <= {error_rate_threshold*100:.0f}%，确定为新阈值")
+            break
+        else:
+            print(f"  [跳过] [{bin_lower:.2f}, {bin_upper:.2f}]: 错误率 {error_rate*100:.1f}% > {error_rate_threshold*100:.0f}%")
+
+    print(f"\n[校准结果] 置信度阈值: {new_threshold} (原值: 0.65)")
+    if abs(new_threshold - 0.65) > 0.1:
+        print(f"  [提示] 阈值变化超过 0.1，建议更新 Agent 系统配置：")
+        print(f"    CONFIDENCE_THRESHOLD = {new_threshold}")
+        print(f"  在 nodes.py 的 result_judge_node 和 agent_node 中同步更新此值")
+    else:
+        print(f"  [提示] 阈值变化在 0.1 以内，可保留原值 0.65 或更新为 {new_threshold}")
+    return new_threshold
+
+
 # ── 主训练流程 ────────────────────────────────────────────────────────────────
 
 def main():
     args = parse_args()
 
     print(f"\n{'='*60}")
-    print(f"Qwen3-32B QLoRA SFT 训练")
+    print(f"Qwen3-32B LoRA SFT 训练（BF16 全精度，8×A100 80G）")
     print(f"模型: {args.model_name_or_path}")
     print(f"数据: {args.data_path}")
     print(f"输出: {args.output_dir}")
@@ -381,27 +484,25 @@ def main():
         # Qwen3 没有 pad_token，使用 eos_token 代替（训练时 pad 位置会被 mask）
         tokenizer.pad_token = tokenizer.eos_token
 
-    # Step 2：加载量化模型（QLoRA 核心）
-    print("[2/5] 加载量化基础模型（QLoRA 4-bit）...")
-    bnb_config = get_bnb_config()
+    # Step 2：加载基础模型（BF16，DeepSpeed ZeRO-3 跨卡分片）
+    print("[2/5] 加载基础模型（BF16）...")
+    # 重要：DeepSpeed ZeRO-3 与 device_map 不兼容。
+    # ZeRO-3 会自行接管参数分片（每卡只持有 1/N 的参数），
+    # 若同时设置 device_map="auto"，HuggingFace 会预先把参数分配到各卡，
+    # 与 ZeRO-3 的分片逻辑冲突，导致显存重复占用或训练挂起。
+    # 正确做法：多卡 DeepSpeed 训练时不设置 device_map，
+    # 单卡调试时可临时改为 device_map="cuda:0"。
     model = AutoModelForCausalLM.from_pretrained(
         args.model_name_or_path,
-        quantization_config=bnb_config,
-        device_map="auto",         # 自动跨多卡分配（单卡时 = "cuda:0"）
         trust_remote_code=True,
         torch_dtype=torch.bfloat16,
+        low_cpu_mem_usage=True,    # 减少模型加载时的 CPU 内存峰值，ZeRO-3 必需
+        # 不设置 device_map：DeepSpeed ZeRO-3 自行接管参数分片
+        # 单卡调试时取消下面注释：
+        # device_map="cuda:0",
         # attn_implementation="flash_attention_2",  # 需要 flash-attn
     )
-
-    # prepare_model_for_kbit_training：
-    # 1. 禁用 4-bit 模型的 layer norm 中的输入梯度（防止精度损失）
-    # 2. 将所有 non-quantized 参数（如 LayerNorm）转为 BF16
-    # 3. 启用 gradient checkpointing
-    model = prepare_model_for_kbit_training(
-        model,
-        use_gradient_checkpointing=True,
-    )
-    print(f"  量化模型加载完成，GPU 显存: {torch.cuda.memory_allocated()/1e9:.1f} GB")
+    print(f"  模型加载完成，GPU 显存: {torch.cuda.memory_allocated()/1e9:.1f} GB")
 
     # Step 3：插入 LoRA 适配器
     print("[3/5] 插入 LoRA 适配器...")
@@ -475,15 +576,35 @@ def main():
     )
     trainer_epoch3.train()
 
-    # 保存最终模型（LoRA 权重 + 训练配置）
-    final_output = Path(args.output_dir) / "final"
-    model.save_pretrained(str(final_output))
-    tokenizer.save_pretrained(str(final_output))
-    print(f"\n[完成] SFT 模型已保存至 {final_output}")
-    print(f"[提示] 下一步:")
+    # 保存 LoRA adapter 权重（用于断点续训或单独分发）
+    lora_output = Path(args.output_dir) / "lora_adapter"
+    model.save_pretrained(str(lora_output))
+    tokenizer.save_pretrained(str(lora_output))
+    print(f"\n[完成] LoRA adapter 已保存至 {lora_output}")
+
+    # Merge LoRA 权重到基础模型，输出完整 BF16 模型供 DPO 使用
+    print("[Merge] 将 LoRA 权重 merge 到基础模型...")
+    merged_model = model.merge_and_unload()
+    merged_output = Path(args.output_dir) / "merged"
+    merged_model.save_pretrained(str(merged_output))
+    tokenizer.save_pretrained(str(merged_output))
+    print(f"[完成] Merged 模型已保存至 {merged_output}")
+    # 置信度阈值校准（在 eval_dataset 上评估，自动找新阈值）
+    print("\n[校准] 在验证集上重新校准置信度阈值...")
+    new_threshold = calibrate_confidence_threshold(
+        model=merged_model,
+        tokenizer=tokenizer,
+        eval_dataset=eval_dataset,
+        error_rate_threshold=0.15,
+    )
+
+    print(f"\n[提示] 下一步:")
     print(f"  1. 运行 prepare_dpo_data.py 构建 DPO 偏好数据")
-    print(f"  2. 运行 train_dpo.py 进行偏好对齐（高危场景阻断率 72.4% → 96.8%）")
-    print(f"  3. 使用 vLLM 部署: vllm serve {final_output} --enable-lora")
+    print(f"     若 HITL 数据不足（< 200 条），可用冷启动模式：")
+    print(f"     python prepare_dpo_data.py --cold_start --api_key <key> --cold_start_count 500")
+    print(f"  2. 运行 train_dpo.py --sft_model_path {merged_output} 进行偏好对齐")
+    print(f"  3. 若置信度阈值有变化，在 nodes.py 中同步更新 CONFIDENCE_THRESHOLD = {new_threshold}")
+    print(f"  4. 使用 vLLM 部署最终 DPO 模型")
 
 
 if __name__ == "__main__":
