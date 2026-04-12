@@ -43,6 +43,7 @@ from peft import LoraConfig, TaskType, get_peft_model
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
+    DataCollatorForSeq2Seq,
     TrainerCallback,
     TrainingArguments,
 )
@@ -50,16 +51,23 @@ from trl import SFTTrainer
 
 # ── 参数解析 ─────────────────────────────────────────────────────────────────
 
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Qwen3-32B LoRA SFT 训练")
-    parser.add_argument("--model_name_or_path", default="Qwen/Qwen3-32B",
-                        help="基础模型路径（HuggingFace Hub ID 或本地路径）")
-    parser.add_argument("--data_path", default="data/sft_clean.jsonl",
-                        help="清洗后的 SFT 训练数据（JSONL 格式）")
-    parser.add_argument("--output_dir", default="checkpoints/sft",
-                        help="模型保存路径")
-    parser.add_argument("--deepspeed", default=None,
-                        help="DeepSpeed 配置文件路径（多卡训练时使用）")
+    parser.add_argument(
+        "--model_name_or_path",
+        default="Qwen/Qwen3-32B",
+        help="基础模型路径（HuggingFace Hub ID 或本地路径）",
+    )
+    parser.add_argument(
+        "--data_path",
+        default="data/sft_clean.jsonl",
+        help="清洗后的 SFT 训练数据（JSONL 格式）",
+    )
+    parser.add_argument("--output_dir", default="checkpoints/sft", help="模型保存路径")
+    parser.add_argument(
+        "--deepspeed", default=None, help="DeepSpeed 配置文件路径（多卡训练时使用）"
+    )
     # 以下参数均有默认值，单卡 Debug 时可以直接运行
     parser.add_argument("--num_train_epochs", type=int, default=3)
     parser.add_argument("--per_device_train_batch_size", type=int, default=2)
@@ -68,12 +76,17 @@ def parse_args():
     parser.add_argument("--lora_r", type=int, default=64)
     parser.add_argument("--lora_alpha", type=int, default=128)
     parser.add_argument("--max_seq_length", type=int, default=4096)
-    parser.add_argument("--hard_sample_upweight", type=float, default=2.0,
-                        help="第 3 个 Epoch 对难例的上采样倍率（笔记 §3.6）")
+    parser.add_argument(
+        "--hard_sample_upweight",
+        type=float,
+        default=2.0,
+        help="第 3 个 Epoch 对难例的上采样倍率（笔记 §3.6）",
+    )
     return parser.parse_args()
 
 
 # ── LoRA 配置 ─────────────────────────────────────────────────────────────────
+
 
 def get_lora_config(r: int, alpha: int) -> LoraConfig:
     """
@@ -104,11 +117,11 @@ def get_lora_config(r: int, alpha: int) -> LoraConfig:
         lora_dropout=0.05,
         bias="none",
         target_modules=[
-            "q_proj",     # Attention: Query
-            "v_proj",     # Attention: Value
-            "o_proj",     # Attention: Output
+            "q_proj",  # Attention: Query
+            "v_proj",  # Attention: Value
+            "o_proj",  # Attention: Output
             "gate_proj",  # MLP: SwiGLU Gate
-            "up_proj",    # MLP: SwiGLU Up
+            "up_proj",  # MLP: SwiGLU Up
             # 不加 k_proj：实验发现收益有限且扰乱位置编码
             # 不加 down_proj：MLP 下投影，影响通用能力较大，不建议加
         ],
@@ -118,6 +131,7 @@ def get_lora_config(r: int, alpha: int) -> LoraConfig:
 
 
 # ── 训练参数 ─────────────────────────────────────────────────────────────────
+
 
 def get_training_args(args, output_dir: str) -> TrainingArguments:
     """
@@ -131,7 +145,7 @@ def get_training_args(args, output_dir: str) -> TrainingArguments:
       - 128 是工业界 SFT 的经验值
 
     学习率 5e-5（Cosine 退火）：
-      - 比预训练（1e-4）小一个数量级（防止破坏预训练权重）
+      - SFT 微调使用较小的学习率，防止破坏预训练权重
       - Cosine 退火：避免最后阶段学习率过高扰乱权重
 
     gradient_checkpointing=True：
@@ -148,17 +162,17 @@ def get_training_args(args, output_dir: str) -> TrainingArguments:
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         learning_rate=args.learning_rate,
         lr_scheduler_type="cosine",
-        warmup_ratio=0.05,          # 5% 步数用于 warmup：防止训练初期梯度爆炸
+        warmup_ratio=0.05,  # 5% 步数用于 warmup：防止训练初期梯度爆炸
         fp16=False,
-        bf16=True,                  # A100 原生支持 BF16，数值更稳定
+        bf16=True,  # A100 原生支持 BF16，数值更稳定
         gradient_checkpointing=True,
         dataloader_num_workers=4,
         logging_steps=10,
         eval_strategy="steps",
-        eval_steps=200,             # 每 200 步做一次评估
+        eval_steps=200,  # 每 200 步做一次评估
         save_strategy="steps",
         save_steps=500,
-        save_total_limit=3,         # 只保留最近 3 个 checkpoint，节省磁盘
+        save_total_limit=3,  # 只保留最近 3 个 checkpoint，节省磁盘
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
         greater_is_better=False,
@@ -173,15 +187,17 @@ def get_training_args(args, output_dir: str) -> TrainingArguments:
 
 # ── 数据加载与格式化 ──────────────────────────────────────────────────────────
 
+
 def load_and_format_dataset(data_path: str, tokenizer, max_seq_length: int) -> Dataset:
     """
-    加载 SFT 数据并格式化为 tokenizer 可处理的格式。
+    加载 SFT 数据，tokenize 并构建正确的 labels。
 
     关键设计：SFT 训练时只对 assistant 部分的 token 计算损失（Cross Entropy Loss）。
     system 和 user 的 token 被 mask 掉（labels 设为 -100）。
 
-    这样模型学到的是：在给定 system+user context 下，如何生成 assistant 的回复。
-    而不是"背诵"用户问了什么。
+    实现方式：在 token 序列中查找所有 "<|im_start|>assistant\n" 的 token ID 子序列，
+    将其后直到 "<|im_end|>" 的 token（含）解除 mask，其余位置保持 -100。
+    多轮对话中每个 assistant 回复均会被正确处理。
 
     ChatML 格式（Qwen 原生）：
       <|im_start|>system
@@ -198,19 +214,21 @@ def load_and_format_dataset(data_path: str, tokenizer, max_seq_length: int) -> D
             if line:
                 raw_data.append(json.loads(line))
 
-    def format_sample(sample: dict) -> dict:
-        """将 messages 格式的样本转换为训练所需的 input_ids 和 labels"""
-        messages = sample["messages"]
+    # 预计算模板 token IDs（只做一次，避免在每条样本中重复 encode）
+    response_template_ids = tokenizer.encode(
+        "<|im_start|>assistant\n", add_special_tokens=False
+    )
+    im_end_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
+    tpl_len = len(response_template_ids)
 
-        # 使用 tokenizer 的 apply_chat_template 生成符合 ChatML 格式的文本
-        # tokenize=False：先生成文本，后续再 tokenize（方便 Debug 查看原始文本）
+    def format_sample(sample: dict) -> dict:
+        """Tokenize 并对 system/user token 设 -100，只保留 assistant 部分的 labels。"""
+        messages = sample["messages"]
         full_text = tokenizer.apply_chat_template(
             messages,
             tokenize=False,
-            add_generation_prompt=False,   # SFT 训练时不加 generation prompt
+            add_generation_prompt=False,
         )
-
-        # Tokenize 整个对话
         tokenized = tokenizer(
             full_text,
             max_length=max_seq_length,
@@ -220,25 +238,23 @@ def load_and_format_dataset(data_path: str, tokenizer, max_seq_length: int) -> D
         )
         input_ids = tokenized["input_ids"]
 
-        # 构建 labels：只计算 assistant 部分的损失
-        # 方法：找到 assistant 回复的起始 token，之前的都设为 -100（忽略）
+        # 初始全部 mask
         labels = [-100] * len(input_ids)
-        assistant_token_id = tokenizer.convert_tokens_to_ids("<|im_start|>")
-        # 找到所有 <|im_start|> 的位置
-        # 注意：Qwen 的 ChatML 格式每个角色都以 <|im_start|> 开头
-        assistant_starts = []
-        for i, tid in enumerate(input_ids):
-            if tid == assistant_token_id:
-                # 检查下一个 token 是否是 "assistant"
-                # 实际实现需要解码后检查，这里用简化逻辑
-                # 生产中应使用 trl 的 DataCollatorForCompletionOnlyLM
-                assistant_starts.append(i)
 
-        # 简化：将最后一段 assistant 回复的标签设为实际 token ID
-        # 生产中推荐使用 TRL 的 DataCollatorForCompletionOnlyLM，
-        # 它能准确地只 mask non-assistant 部分
-        # 这里为了教学清晰，用简化方式表示
-        labels = input_ids.copy()  # 简化：全部计算损失（真实训练应 mask system/user）
+        # 逐段找 response_template，解除 mask
+        i = 0
+        while i <= len(input_ids) - tpl_len:
+            if input_ids[i : i + tpl_len] == response_template_ids:
+                start = i + tpl_len  # assistant 内容的第一个 token
+                j = start
+                while j < len(input_ids) and input_ids[j] != im_end_id:
+                    j += 1
+                # 解除 mask，包含末尾的 <|im_end|>
+                for k in range(start, min(j + 1, len(input_ids))):
+                    labels[k] = input_ids[k]
+                i = j + 1
+            else:
+                i += 1
 
         return {
             "input_ids": input_ids,
@@ -247,10 +263,11 @@ def load_and_format_dataset(data_path: str, tokenizer, max_seq_length: int) -> D
         }
 
     dataset = Dataset.from_list(raw_data)
-    return dataset
+    return dataset.map(format_sample, remove_columns=dataset.column_names)
 
 
 # ── 早停回调（笔记 §3.6）────────────────────────────────────────────────────────
+
 
 class EarlyStoppingCallback(TrainerCallback):
     """
@@ -262,6 +279,7 @@ class EarlyStoppingCallback(TrainerCallback):
     注意：HuggingFace Trainer 内置了 EarlyStoppingCallback（基于 eval_loss），
     这里实现基于自定义指标（过拟合差距）的早停，作为额外保障。
     """
+
     def __init__(self, overfit_threshold: float = 0.3):
         self.overfit_threshold = overfit_threshold
         self.best_eval_format_compliance = 0.0
@@ -278,7 +296,9 @@ class EarlyStoppingCallback(TrainerCallback):
         if train_loss > 0 and eval_loss > 0:
             gap = eval_loss - train_loss
             if gap > self.overfit_threshold:
-                print(f"\n[EarlyStopping] 训练集与验证集 loss 差距 {gap:.3f} > {self.overfit_threshold}，停止训练")
+                print(
+                    f"\n[EarlyStopping] 训练集与验证集 loss 差距 {gap:.3f} > {self.overfit_threshold}，停止训练"
+                )
                 control.should_training_stop = True
                 return
 
@@ -291,11 +311,12 @@ class EarlyStoppingCallback(TrainerCallback):
             else:
                 self.no_improve_count += 1
                 if self.no_improve_count >= 5:
-                    print(f"\n[EarlyStopping] 格式合规率连续 5 步未提升，停止训练")
+                    print("\n[EarlyStopping] 格式合规率连续 5 步未提升，停止训练")
                     control.should_training_stop = True
 
 
 # ── 难例上采样（笔记 §3.6、§5.3）────────────────────────────────────────────────
+
 
 def upsample_hard_examples(
     dataset: Dataset,
@@ -319,14 +340,8 @@ def upsample_hard_examples(
     # 识别错误恢复类场景（最容易做错的类型）
     hard_scenarios = {"error_recovery", "auth_bearer"}
 
-    hard_samples = [
-        s for s in dataset
-        if s.get("scenario") in hard_scenarios
-    ]
-    easy_samples = [
-        s for s in dataset
-        if s.get("scenario") not in hard_scenarios
-    ]
+    hard_samples = [s for s in dataset if s.get("scenario") in hard_scenarios]
+    easy_samples = [s for s in dataset if s.get("scenario") not in hard_scenarios]
 
     # 对难例按 upweight 重复
     extra_hard = hard_samples * int(upweight - 1)
@@ -378,7 +393,6 @@ def calibrate_confidence_threshold(
       eval_dataset 中的样本需要包含 "expected_verdict" 字段（PASS/FAIL/INCONCLUSIVE），
       用于判断模型输出是否正确。若验证集没有此字段，本函数返回默认值 0.65。
     """
-    import numpy as np
 
     model.eval()
     bin_width = 1.0 / score_bins
@@ -411,12 +425,13 @@ def calibrate_confidence_threshold(
                 do_sample=False,
             )
             generated = tokenizer.decode(
-                output_ids[0][inputs["input_ids"].shape[1]:],
+                output_ids[0][inputs["input_ids"].shape[1] :],
                 skip_special_tokens=True,
             )
 
             # 从生成文本中提取 confidence_score
             import re as _re
+
             score_match = _re.search(r'"confidence_score"\s*:\s*([0-9.]+)', generated)
             verdict_match = _re.search(r'"verdict"\s*:\s*"(\w+)"', generated)
 
@@ -427,7 +442,7 @@ def calibrate_confidence_threshold(
             predicted_verdict = verdict_match.group(1).upper()
             expected_verdict = sample["expected_verdict"].upper()
 
-            is_correct = (predicted_verdict == expected_verdict)
+            is_correct = predicted_verdict == expected_verdict
             bin_idx = min(int(confidence / bin_width), score_bins - 1)
             bins[bin_idx][1] += 1
             if is_correct:
@@ -446,16 +461,20 @@ def calibrate_confidence_threshold(
         if error_rate <= error_rate_threshold:
             # 从这个 bin 开始，错误率可接受，新阈值 = 这个 bin 的下界
             new_threshold = round(bin_lower, 2)
-            print(f"  [校准] confidence >= {new_threshold:.2f} 时错误率 {error_rate*100:.1f}% <= {error_rate_threshold*100:.0f}%，确定为新阈值")
+            print(
+                f"  [校准] confidence >= {new_threshold:.2f} 时错误率 {error_rate * 100:.1f}% <= {error_rate_threshold * 100:.0f}%，确定为新阈值"
+            )
             break
         else:
-            print(f"  [跳过] [{bin_lower:.2f}, {bin_upper:.2f}]: 错误率 {error_rate*100:.1f}% > {error_rate_threshold*100:.0f}%")
+            print(
+                f"  [跳过] [{bin_lower:.2f}, {bin_upper:.2f}]: 错误率 {error_rate * 100:.1f}% > {error_rate_threshold * 100:.0f}%"
+            )
 
     print(f"\n[校准结果] 置信度阈值: {new_threshold} (原值: 0.65)")
     if abs(new_threshold - 0.65) > 0.1:
-        print(f"  [提示] 阈值变化超过 0.1，建议更新 Agent 系统配置：")
+        print("  [提示] 阈值变化超过 0.1，建议更新 Agent 系统配置：")
         print(f"    CONFIDENCE_THRESHOLD = {new_threshold}")
-        print(f"  在 nodes.py 的 result_judge_node 和 agent_node 中同步更新此值")
+        print("  在 nodes.py 的 result_judge_node 和 agent_node 中同步更新此值")
     else:
         print(f"  [提示] 阈值变化在 0.1 以内，可保留原值 0.65 或更新为 {new_threshold}")
     return new_threshold
@@ -463,22 +482,23 @@ def calibrate_confidence_threshold(
 
 # ── 主训练流程 ────────────────────────────────────────────────────────────────
 
+
 def main():
     args = parse_args()
 
-    print(f"\n{'='*60}")
-    print(f"Qwen3-32B LoRA SFT 训练（BF16 全精度，8×A100 80G）")
+    print(f"\n{'=' * 60}")
+    print("Qwen3-32B LoRA SFT 训练（BF16 全精度，8×A100 80G）")
     print(f"模型: {args.model_name_or_path}")
     print(f"数据: {args.data_path}")
     print(f"输出: {args.output_dir}")
-    print(f"{'='*60}\n")
+    print(f"{'=' * 60}\n")
 
     # Step 1：加载 Tokenizer
     print("[1/5] 加载 Tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(
         args.model_name_or_path,
         trust_remote_code=True,
-        padding_side="right",   # Causal LM 需要右侧 padding
+        padding_side="right",  # Causal LM 需要右侧 padding
     )
     if tokenizer.pad_token is None:
         # Qwen3 没有 pad_token，使用 eos_token 代替（训练时 pad 位置会被 mask）
@@ -496,13 +516,13 @@ def main():
         args.model_name_or_path,
         trust_remote_code=True,
         torch_dtype=torch.bfloat16,
-        low_cpu_mem_usage=True,    # 减少模型加载时的 CPU 内存峰值，ZeRO-3 必需
+        low_cpu_mem_usage=True,  # 减少模型加载时的 CPU 内存峰值，ZeRO-3 必需
         # 不设置 device_map：DeepSpeed ZeRO-3 自行接管参数分片
         # 单卡调试时取消下面注释：
         # device_map="cuda:0",
         # attn_implementation="flash_attention_2",  # 需要 flash-attn
     )
-    print(f"  模型加载完成，GPU 显存: {torch.cuda.memory_allocated()/1e9:.1f} GB")
+    print(f"  模型加载完成，GPU 显存: {torch.cuda.memory_allocated() / 1e9:.1f} GB")
 
     # Step 3：插入 LoRA 适配器
     print("[3/5] 插入 LoRA 适配器...")
@@ -512,15 +532,15 @@ def main():
     # 打印可训练参数量（LoRA 的参数只有模型总参数的 ~0.1-1%）
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total_params = sum(p.numel() for p in model.parameters())
-    print(f"  可训练参数: {trainable_params:,} ({trainable_params/total_params*100:.2f}%)")
+    print(
+        f"  可训练参数: {trainable_params:,} ({trainable_params / total_params * 100:.2f}%)"
+    )
     print(f"  总参数: {total_params:,}")
 
     # Step 4：加载数据集
     print("[4/5] 加载训练数据...")
     full_dataset = load_and_format_dataset(
-        args.data_path,
-        tokenizer,
-        args.max_seq_length,
+        args.data_path, tokenizer, args.max_seq_length
     )
 
     # 分割训练集和验证集（95% train，5% eval）
@@ -533,14 +553,21 @@ def main():
     print("[5/5] 开始训练...")
     training_args = get_training_args(args, args.output_dir)
 
+    # DataCollatorForSeq2Seq：负责 padding，labels 的 masking 已在数据加载时完成。
+    # label_pad_token_id=-100 确保 padding 位置不参与 loss 计算。
+    collator = DataCollatorForSeq2Seq(
+        tokenizer=tokenizer,
+        model=model,
+        label_pad_token_id=-100,
+        pad_to_multiple_of=8,
+    )
+
     trainer = SFTTrainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
-        # TRL SFTTrainer 的关键参数：
-        # max_seq_length：超过长度的样本会被截断而非丢弃
-        # dataset_text_field：若数据是纯文本格式，指定字段名（此处用 messages 格式）
+        data_collator=collator,
         callbacks=[EarlyStoppingCallback(overfit_threshold=0.3)],
     )
 
@@ -573,6 +600,7 @@ def main():
         args=training_args_epoch3,
         train_dataset=hard_upsampled_dataset,
         eval_dataset=eval_dataset,
+        data_collator=collator,
     )
     trainer_epoch3.train()
 
@@ -598,13 +626,17 @@ def main():
         error_rate_threshold=0.15,
     )
 
-    print(f"\n[提示] 下一步:")
-    print(f"  1. 运行 prepare_dpo_data.py 构建 DPO 偏好数据")
-    print(f"     若 HITL 数据不足（< 200 条），可用冷启动模式：")
-    print(f"     python prepare_dpo_data.py --cold_start --api_key <key> --cold_start_count 500")
+    print("\n[提示] 下一步:")
+    print("  1. 运行 prepare_dpo_data.py 构建 DPO 偏好数据")
+    print("     若 HITL 数据不足（< 200 条），可用冷启动模式：")
+    print(
+        "     python prepare_dpo_data.py --cold_start --api_key <key> --cold_start_count 500"
+    )
     print(f"  2. 运行 train_dpo.py --sft_model_path {merged_output} 进行偏好对齐")
-    print(f"  3. 若置信度阈值有变化，在 nodes.py 中同步更新 CONFIDENCE_THRESHOLD = {new_threshold}")
-    print(f"  4. 使用 vLLM 部署最终 DPO 模型")
+    print(
+        f"  3. 若置信度阈值有变化，在 nodes.py 中同步更新 CONFIDENCE_THRESHOLD = {new_threshold}"
+    )
+    print("  4. 使用 vLLM 部署最终 DPO 模型")
 
 
 if __name__ == "__main__":
