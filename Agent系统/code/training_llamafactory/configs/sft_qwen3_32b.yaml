@@ -1,0 +1,60 @@
+### 模型
+model_name_or_path: Qwen/Qwen3-32B
+
+### 训练方式
+stage: sft
+do_train: true
+finetuning_type: lora
+
+### LoRA 超参（文档 §3.4）
+# r=64 是格式合规率与显存的最优平衡点（r=64: 96.7%，r=128: 96.9% 但显存翻倍）
+lora_rank: 64
+lora_alpha: 128
+lora_dropout: 0.05
+# 不加 k_proj（实验发现收益有限且扰乱位置编码）和 down_proj（影响通用能力）
+lora_target: q_proj,v_proj,o_proj,gate_proj,up_proj
+
+### 数据集
+dataset_dir: data
+dataset: sft_5g
+# Qwen3 模板；若 LlamaFactory 版本不识别 qwen3，改为 qwen2
+template: qwen3
+cutoff_len: 4096
+preprocessing_num_workers: 16
+overwrite_cache: false
+
+### 训练超参（文档 §3.4）
+# 等效 batch = per_device(2) × grad_accum(8) × num_gpus(8) = 128
+per_device_train_batch_size: 2
+gradient_accumulation_steps: 8
+learning_rate: 5.0e-5
+num_train_epochs: 3
+lr_scheduler_type: cosine
+warmup_ratio: 0.05     # 5% 步数 warmup，防止训练初期梯度爆炸
+bf16: true
+pure_bf16: true        # A100 原生 BF16，数值稳定
+
+### 显存优化
+gradient_checkpointing: true   # 重算 attention 换显存，减少约 40%
+dataloader_num_workers: 4
+ddp_timeout: 180000000
+
+### DeepSpeed ZeRO-3（文档 §3.5）
+deepspeed: configs/deepspeed_zero3.json
+
+### 评估与保存
+val_size: 0.05
+per_device_eval_batch_size: 1
+eval_strategy: steps
+eval_steps: 200
+save_strategy: steps
+save_steps: 500
+save_total_limit: 3
+load_best_model_at_end: true
+metric_for_best_model: eval_loss
+
+### 输出
+output_dir: checkpoints/sft
+logging_steps: 10
+report_to: tensorboard
+plot_loss: true

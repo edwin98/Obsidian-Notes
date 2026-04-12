@@ -1,0 +1,70 @@
+### 模型（使用 SFT merge 后的完整模型，文档 §4.3）
+# Reference Model = SFT merged 模型，而非基座。
+# 原因：若 Reference 是基座，DPO 同时对抗基座和 SFT 影响，导致格式能力退化。
+model_name_or_path: checkpoints/sft/merged
+
+### 训练方式
+stage: dpo
+do_train: true
+finetuning_type: lora
+
+### DPO 超参（文档 §4.3）
+# beta=0.1：平衡"安全提升"与"保留 SFT 能力"的推荐值
+# beta 过小(0.01)：安全效果强但可能遗忘格式；过大(0.5)：DPO 效果微弱
+pref_beta: 0.1
+# sigmoid = 标准 DPO（Rafailov et al., 2023）；也可选 ipo / kto_pair
+pref_loss: sigmoid
+
+### LoRA 超参（比 SFT 更保守，文档 §4.3）
+# r=32（而非 SFT 的 64）：偏好对齐任务相对简单，较小的 r 降低过拟合风险
+# 偏好数据量（~1.2 万对）远少于 SFT（~5 万条），过大的 r 容易过拟合
+lora_rank: 32
+lora_alpha: 64
+lora_dropout: 0.05
+lora_target: q_proj,v_proj,o_proj,gate_proj,up_proj
+
+### 数据集
+dataset_dir: data
+dataset: dpo_5g
+template: qwen3
+cutoff_len: 4096
+preprocessing_num_workers: 16
+overwrite_cache: false
+
+### 训练超参（文档 §4.3）
+# batch=1：DPO 每条样本需要同时处理 chosen 和 rejected，实际显存消耗翻倍
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 16
+# 1e-6：比 SFT(5e-5) 小约 50 倍，防止过度偏离 SFT 学到的能力
+learning_rate: 1.0e-6
+# 偏好数据量少，2 个 Epoch 足够
+num_train_epochs: 2
+lr_scheduler_type: cosine
+warmup_ratio: 0.05
+bf16: true
+pure_bf16: true
+
+### 显存优化
+gradient_checkpointing: true
+dataloader_num_workers: 4
+ddp_timeout: 180000000
+
+### DeepSpeed ZeRO-3
+deepspeed: configs/deepspeed_zero3.json
+
+### 评估与保存
+val_size: 0.1
+per_device_eval_batch_size: 1
+eval_strategy: steps
+eval_steps: 100
+save_strategy: steps
+save_steps: 200
+save_total_limit: 3
+load_best_model_at_end: true
+metric_for_best_model: eval_loss
+
+### 输出
+output_dir: checkpoints/dpo
+logging_steps: 10
+report_to: tensorboard
+plot_loss: true
