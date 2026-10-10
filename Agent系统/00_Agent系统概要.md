@@ -7,6 +7,11 @@ status: active
 ---
 # Agent 系统概要
 
+> [!note] 记录口径（2026-10-10 修订）
+> 文中包含设计方案、历史配置与效果数字。未关联数据集版本、运行 ID、checkpoint 或评测日志的数字需核实，不直接作为实测结论；本地示例代码与生产部署状态分别说明。
+
+**设计与示例代码的区别**：本节的 T-Test/KS-Test 是待实现或验证的统计方案。当前 `code/nodes.py` 使用硬阈值、包络越界规则及一个正态近似演示函数；单个 pass_rate 无法做显著性检验，越界比例也不是 KS 统计量或 p 值。正式检验需收集多次运行的原始样本，按配对关系和分布选择方法，例如 SciPy 的 ttest_1samp/ttest_ind/ttest_rel、ks_2samp，并报告置信区间、效应量与多重比较处理。
+
 ## 系统骨架：三个嵌套闭环
 
 理解这个 Agent 系统，最重要的是把它看成**三个运行在不同时间尺度上的嵌套闭环**，而不是一堆平铺的技术组件。
@@ -256,10 +261,10 @@ Agent 在复杂任务中极易陷入无效循环或产生幻觉递归，需要�
 
 | 熔断层级 | 触发条件 | 机制 | 处理方式 |
 |:---|:---|:---|:---|
-| **硬熔断（第一层）** | 图迭代深度超过阈值（如 15 跳） | LangGraph `recursion_limit` | 强制挂起，上报异常 |
+| **硬上限** | 超过图 super-step 上限（如 15） | LangGraph `recursion_limit` | 抛出 GraphRecursionError，由应用捕获并安排告警/人工处理 |
 | **软熔断（第二层）** | 连续工具错误 ≥ 3 次，或置信度 < 0.65 | State 中 `error_count` / `confidence_score` | 路由至 HITL 人工介入 |
 
-**置信度阈值的确定**：不是拍脑袋，而是通过大量压测找到相变点。在 5G 测试项目中，0.65 是关键阈值——低于此值时 Agent 自主执行的错误率急剧上升。
+**置信度阈值口径**：0.65 是历史设计阈值，缺少对应验证集和压测日志时不能宣称已找到相变点。LLM 自报分数不是校准概率，应按任务与模型版本统计正确率、误放行率和人工介入率，验证阈值；低分路由 HITL 时，提高阈值会使更多任务进入人工审批。
 
 ### 4.2 Human-in-the-Loop（HITL）工程实现
 
@@ -276,7 +281,7 @@ LangGraph 方式（正确）：
 LangGraph 将 State 快照序列化至 Postgres（interrupt_before 钩子）
    │
    ▼
-释放计算资源（进程终止，显存释放）
+当前图调用返回，任务等待审批（进程和常驻模型不自动退出）
    │
    ▼
 Celery 异步触发钉钉告警 Webhook
@@ -288,8 +293,10 @@ Celery 异步触发钉钉告警 Webhook
 API 唤醒 → 从 Postgres 拉取 Thread_ID 对应的 State
    │
    ▼
-将修改后的参数注入 State，调用 .resume() 恢复执行
+静态断点：update_state 后 invoke(None, config)；动态中断：Command(resume=...)
 ```
+
+持久化 checkpointer 保存状态后，当前图调用返回并等待审批，不自动终止进程或卸载常驻 GPU 模型。静态 interrupt_before 断点：同一 thread_id 下先 update_state，再 invoke(None, config)；动态 interrupt()：invoke(Command(resume=审批结果), config)。应用负责鉴权、任务归属校验和参数校验，动态中断恢复会重执行节点，中断前副作用需幂等。
 
 **HITL 解决的三类业务问题**：
 1. **灾难性环境摧毁防护**：拦截包含高危写权限信令的用例（如 `format_c`、`reset_all`）
@@ -420,11 +427,11 @@ Andrew Ng 提出的四大工作流设计模式，在工业落地中往往比完�
 └── 3GPP 协议注入的领域知识对话
 
 技术方案（32B 量级）：
-DeepSpeed ZeRO-3 + LoRA（BF16 全精度，无量化）
+DeepSpeed ZeRO-3 + LoRA（BF16 加载，无 4-bit 量化；BF16 不是 FP32 全精度）
 LoRA 插入位置：q_proj, v_proj, o_proj, gate_proj, up_proj
 超参数：r=64, α=128, dropout=0.05, lr=5e-5 (Cosine 退火)
 硬件：8×A100 80G，FlashAttention-2 + Gradient Checkpointing
-说明：算力充足时选 LoRA 而非 QLoRA，避免 nf4 量化误差影响工具调用格式精确性
+说明：本地 train_sft.py 采用 BF16 LoRA，未配置 BitsAndBytes 4-bit 量化；历史生产运行的硬件、时长与效果仍需日志核实。
 ```
 
 ### 7.2 DPO 偏好对齐（抑制危险幻觉）

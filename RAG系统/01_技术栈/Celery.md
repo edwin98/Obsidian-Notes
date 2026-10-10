@@ -29,17 +29,16 @@ import time
 # 定义 Celery App 实例
 # 选用 Redis 为消息代理 (Broker) 与结果状态载体 (Backend)
 celery_app = Celery(
-    'rag_tasks', 
-    broker='redis://redis-cluster:6379/1',
-    backend='redis://redis-cluster:6379/2'
+    "rag_tasks",
+    broker="redis://redis-cluster:6379/1",
+    backend="redis://redis-cluster:6379/2",
 )
 
 # 配置任务路由，将耗时任务专线处理
-celery_app.conf.task_routes = {
-    'tasks.summarize': {'queue': 'gpu_intensive'}
-}
+celery_app.conf.task_routes = {"tasks.summarize": {"queue": "gpu_intensive"}}
 
-@celery_app.task(bind=True, max_retries=5, rate_limit='10/m')
+
+@celery_app.task(name="tasks.summarize", bind=True, max_retries=5, rate_limit="10/m")
 def async_summarize_session(self, session_id):
     """
     异步对话压缩任务：
@@ -48,23 +47,23 @@ def async_summarize_session(self, session_id):
     try:
         # 获取业务上下文
         history = db.get_session_session(session_id)
-        
+
         # 核心 AI 压缩操作 (耗时可能 > 5s)
-        summary = llm.summarize_context(history) 
-        
+        summary = llm.summarize_context(history)
+
         # 更新数据库
         db.update_session_summary(session_id, summary)
         return {"status": "success", "session": session_id}
     except Exception as exc:
-        # 异常重试策略：2s, 4s, 8s, 16s...
-        raise self.retry(exc=exc, countdown=2 ** self.request.retries)
+        # 异常重试策略：1s, 2s, 4s, 8s...
+        raise self.retry(exc=exc, countdown=2**self.request.retries)
 ```
 
 ## 5. 注意事项与坑点
 - **Result Backend 爆炸**：由于 RAG 任务多，如果开启了 `result_backend` 且不设置存活时间，Redis 内存会被任务结果塞满。务必设置 `result_expires`。
 - **数据库连接泄漏**：Celery Worker 是多进程执行。在任务代码中如果直接实例化 DB 连接而不在任务结束时关闭，会迅速耗尽数据库连接池。
 - **可视化利器 Flower**：强烈建议开启 Flower 界面，实时观察任务成功率、并发数以及哪些节点处于负载状态。
-- **序列化选择**：默认使用 `json`。如果任务中需要传递复杂的 Numpy 数组（如向量），建议配置使用 `pickle` 或先将数据入缓存，只传递 ID。
+- **序列化选择**：优先 JSON；大数组等数据存入对象存储/缓存，任务只传 ID。pickle 可执行反序列化代码，不应用于不可信消息。
 
 ## 6. Celery 常见面试问题及回答
 
@@ -75,11 +74,11 @@ def async_summarize_session(self, session_id):
 
 ### Q2: 如果 Celery Worker 处理任务失败了怎么办？如何保证任务不丢失？
 **回答**：
-- **重试机制**：可以在 `@celery_app.task(bind=True, max_retries=3)` 中配置自动重试，并且可以在异常捕获中通过 `raise self.retry(exc=exc, countdown=2 ** self.request.retries)` 实现**指数退避重试**（避免密集重试压垮第三方 API）。
-- **防丢失（ACK 机制）**：Worker 默认在任务执行完成后（不管成功还是抛出异常）才会向 Broker 发送 ACK（确认信号）。如果在执行中途 Worker 进程崩溃（如 OOM），Broker 没有收到 ACK，等超时后会将该任务重新分配给其他 Worker 再次执行。
+- **重试**：`max_retries` 只设上限，不会自动重试。显式调用 `self.retry`，或配置 `autoretry_for` 才会触发相应重试策略。
+- **ACK**：默认在执行前确认。`acks_late=True` 推迟到执行后确认；worker 子进程异常退出等情况还需考虑 `task_reject_on_worker_lost=True`、broker 的恢复机制和消息持久化。重投可能导致重复执行，应设计幂等，不能承诺仅靠 ACK 配置绝不丢失。
 
 ### Q3: 为什么在 RAG 场景中，把长任务交给 Celery 而不是直接用 Python 的多线程或协程去跑？
 **回答**：
-1. **可靠性**：FastAPI 的协程/后台任务（BackgroundTasks）受限于 Web 进程的生命周期。如果 Web 节点重启或崩溃，内存中还在跑的任务就会全部丢失。Celery 将任务持久化在 Broker 中，即使整个集群重启也能恢复断点。
+1. **可靠性**：broker 持久化及确认配置可支持故障后重投任务，但通常从头执行；恢复业务处理进度需要应用自己持久化 checkpoint。FastAPI BackgroundTasks 则依赖 Web 进程生命周期。
 2. **算力隔离与扩容**：大模型的向量计算或大文档解析极耗 CPU/GPU。Celery 能够将 Web 服务器（I/O 密集型）与 Worker 节点（CPU密集型）物理隔离。如果遇到离线入库高峰，我们可以单独为 Worker 增加机器（横向扩容），而不影响在线 Web 服务的稳定。
 3. **复杂编排**：Celery 原生支持延时任务、定时任务（Celery Beat）、失败重试序列与任务链（Chains）等复杂的编排需求，这些如果是用协程手写，代码会非常臃肿且难以维护。

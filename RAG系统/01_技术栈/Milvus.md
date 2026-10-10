@@ -4,7 +4,7 @@
 
 ## 0. 技术原理与背景信息
 *   **技术原理**：Milvus 的底层主要依赖了近似最近邻（ANN，Approximate Nearest Neighbor）搜索算法，特别是基于图的 HNSW（Hierarchical Navigable Small World）等高阶索引结构。它将每个文本块转化为几百维度的空间向量，在建库时通过算法在空间中构建出层级图网络。检索时类似于“导航”，通过沿着空间中的节点快速向着目标向量逼近，避免了暴力遍历（KNN）计算每一条数据的余弦距离，从而在十亿级数据中实现毫秒响应。
-*   **背景信息（为什么需要它）**：最初人们尝试将向量存入传统关系型数据库甚至 Redis 中进行暴力比对找相似度，但随着 RAG 切片数量从几千涨到几千万，暴力比对的计算量呈指数爆炸，耗时从毫秒变成几十秒，完全不可用。为了支撑海量、高维度的向量存储，并支持在搜索向量相似度的同时进行复杂的标量（比如“只搜索部门A的权限范围”）混合过滤，专门为大模型定制的、支持云原生分布式扩容的向量数据库 Milvus 就成为了企业级 RAG 架构的首选基石。
+* **背景**：对 n 个 d 维向量逐一比较，单查询距离计算成本通常为 O(nd)，随数据量线性增长，而非指数增长。ANN 用索引在召回率、资源和延迟间权衡；规模与时延表现需结合索引、硬件和负载测试。
 
 ## 1. 核心作用
 *   **语义特征存储**：存储经过 Embedding 模型转换后的高维向量（384维与768维）。
@@ -35,26 +35,26 @@ collection = Collection("rag_knowledge_vectors")
 
 # 1. 配置 HNSW 获取精度
 search_params = {
-    "metric_type": "COSINE", # 领域模型依赖余弦距离度量
-    "params": {"ef": 128}    # 图搜索范围控制
+    "metric_type": "COSINE",  # 领域模型依赖余弦距离度量
+    "params": {"ef": 128},  # 图搜索范围控制
 }
 
 # 2. 标量前置过滤: 利用表达式将检索锁定在特定基站范围并过滤软删除知识
 expr = f"pdu == '基站产品' and is_deleted == False"
 
-# 3. 高性能异步推测批量搜素
+# 3. Collection.search 默认是同步批量搜索
 results = collection.search(
     data=[user_query_embedding_768d],
     anns_field="vector_768",
     param=search_params,
-    limit=80,      # Top 80送入后续 Rerank Cross-Encoder 管线
+    limit=80,  # Top 80送入后续 Rerank Cross-Encoder 管线
     expr=expr,
-    output_fields=["chunk_id", "text_snippet", "doc_name"]
+    output_fields=["chunk_id", "text_snippet", "doc_name"],
 )
 ```
 
 ## 5. 注意事项与坑点
-- **度量指标一致性**：Embedding 模型微调时若是用的余弦相似度，Milvus 检索必须指定 `metric_type: "COSINE"`，否则分数无意义。
+- **度量指标**：保证模型训练与检索度量兼容。L2 归一化后，IP 与 COSINE 同序，平方 L2=2-2×COSINE 也对应同序（方向相反）；阈值和分数方向需转换。未归一化时不能直接视为等价。
 - **过大的输出字段限制**：如果 `output_fields` 中包含巨大的 Text Chunk，会极大拖慢 RPC 响应速度。建议只存储 ID 和 Metadata，正文通过 Redis 或文件系统二次获取。
 - **内存水位线**：HNSW 极其吃内存，需严密监控处理节点的 RAM 占用，防止 OOM 导致服务断流。
 - **删除延迟**：Milvus 的删除是软删除，且 Compaction 动作较重。高频更新场景下应配合过滤标志位（如 `is_deleted`）使用。

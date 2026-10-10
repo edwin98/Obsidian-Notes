@@ -10,6 +10,11 @@ status: active
 
 # Agent 主力模型后训练全流程：SFT + DPO
 
+> [!note] 记录口径（2026-10-10 修订）
+> 文中包含设计方案、历史配置与效果数字。未关联数据集版本、运行 ID、checkpoint 或评测日志的数字需核实，不直接作为实测结论；本地示例代码与生产部署状态分别说明。
+
+**设计与示例代码的区别**：本节的 T-Test/KS-Test 是待实现或验证的统计方案。当前 `code/nodes.py` 使用硬阈值、包络越界规则及一个正态近似演示函数；单个 pass_rate 无法做显著性检验，越界比例也不是 KS 统计量或 p 值。正式检验需收集多次运行的原始样本，按配对关系和分布选择方法，例如 SciPy 的 ttest_1samp/ttest_ind/ttest_rel、ks_2samp，并报告置信区间、效应量与多重比较处理。
+
 > 本文档详细描述 5G 测试验证 Agent 系统中 Qwen3-32B 主力模型的后训练过程，包括为什么要做、数据如何产生、训练细节和方案选型逻辑。
 
 ---
@@ -272,17 +277,17 @@ Action: simulation_runner
 全参微调：
   优点：更充分利用所有参数，性能上限更高
   缺点：
-  ├── 显存需求：32B模型全参微调需要约 2TB 显存（BF16 + 优化器状态）
+  ├── 显存需求：32B 模型在 16 bytes/参数的混合精度 Adam 假设下，静态状态约 512GB，另加激活、缓冲和聚合峰值；ZeRO/offload 改变每卡需求
   ├── 训练时间：单次 Epoch 需要数天
   └── 风险：容易灾难性遗忘（Catastrophic Forgetting）通用能力
 
 LoRA（Low-Rank Adaptation）：
   优点：
-  ├── 显存：基座模型以 BF16 加载，8×A100 ZeRO-3 分片后每卡仅需约 10GB 存放参数
-  ├── 效果：在充分数据下，效果接近全参（通常 95%+ 的性能）
-  ├── 精度：BF16 全精度权重保留，无量化误差，适合对数值精度有要求的推理任务
-  └── 安全：原始权重冻结，通用能力不受损
-  缺点：性能上限低于全参（可接受）；相比 QLoRA 显存占用更高，需要足够的 GPU 资源
+  ├── 显存：基座模型以 BF16 加载，理想 8 卡 ZeRO-3 分片后每卡基础参数约 8GB（32B×2 bytes/8），另加聚合峰值、适配器、优化器和激活
+  ├── 效果：与全参的效果差距需按任务与预算实测，没有统一 95%+ 保证
+  ├── 精度：BF16 精度权重保留，无量化误差，适合对数值精度有要求的推理任务
+  └── 安全：基座权重冻结便于切换适配器，但启用适配器后的通用能力仍可能退化，需评测
+  局限：相对全参的效果取决于秩、模块选择与任务，需实验比较；相比 QLoRA 显存占用更高，需要足够的 GPU 资源
 ```
 
 **为什么选 LoRA 而不是其他 PEFT 方法（Prefix Tuning、Adapter 等）**：
@@ -291,22 +296,22 @@ LoRA 的可解释性和稳定性更好：梯度直接更新低秩矩阵，不引
 
 **为什么不使用 QLoRA（4bit 量化 LoRA）**：
 
-本项目使用 8×A100 80G（总显存 640GB），完全可以承载 32B 模型的 BF16 全精度加载，无需通过量化压缩显存。QLoRA 的 NF4 量化会引入量化误差，在工具调用格式精确性和数值参数准确性上略有损失。在算力充足的情况下，LoRA 是比 QLoRA 更优的选择。
+本项目使用 8×A100 80G（总显存 640GB），完全可以承载 32B 模型的 BF16 精度加载，无需通过量化压缩显存。QLoRA 的 NF4 量化会引入权重量化误差，是否影响工具调用格式和数值参数准确性需要同条件评测；算力充足可采用 BF16 LoRA，不能断言其在所有任务上优于 QLoRA。
 
 ### 3.4 训练配置详解
 
 ```python
 # LoRA 超参数
 lora_config = LoraConfig(
-    r=64,                    # 秩（rank）：越大表达能力越强，但参数量增加
-    lora_alpha=128,          # 缩放因子：通常设为 2*r，控制 LoRA 更新的学习率缩放
-    lora_dropout=0.05,       # 防过拟合，5% 是经验值
-    target_modules=[         # 关键插入位置
-        "q_proj",            # Query 投影：影响注意力模式，对工具选择最关键
-        "v_proj",            # Value 投影：影响信息提取
-        "o_proj",            # Output 投影：影响最终输出
-        "gate_proj",         # MLP Gate：Qwen 的 SwiGLU 激活门控
-        "up_proj",           # MLP Up：扩展维度
+    r=64,  # 秩（rank）：越大表达能力越强，但参数量增加
+    lora_alpha=128,  # 缩放因子：通常设为 2*r，控制 LoRA 更新的学习率缩放
+    lora_dropout=0.05,  # 防过拟合，5% 是经验值
+    target_modules=[  # 关键插入位置
+        "q_proj",  # Query 投影：影响注意力模式，对工具选择最关键
+        "v_proj",  # Value 投影：影响信息提取
+        "o_proj",  # Output 投影：影响最终输出
+        "gate_proj",  # MLP Gate：Qwen 的 SwiGLU 激活门控
+        "up_proj",  # MLP Up：扩展维度
     ],
     # 为什么不插入 k_proj？
     # Key 投影主要影响注意力的键空间，在工具调用格式化任务中
@@ -315,24 +320,24 @@ lora_config = LoraConfig(
     task_type="CAUSAL_LM",
 )
 
-# 模型加载：BF16 全精度，不做量化
+# 模型加载：BF16 精度，不做量化
 model = AutoModelForCausalLM.from_pretrained(
     "Qwen/Qwen3-32B",
-    torch_dtype=torch.bfloat16,   # 全精度BF16，数值稳定且精度无损
-    device_map="auto",            # ZeRO-3 接管分片，此处先 auto 初始化
+    torch_dtype=torch.bfloat16,  # BF16，指数范围较大，但不是 FP32 全精度
+    device_map="auto",  # ZeRO-3 接管分片，此处先 auto 初始化
 )
 
 # 训练超参数
 training_args = TrainingArguments(
-    num_train_epochs=3,               # 3个Epoch：实验发现2个Epoch欠拟合，4个开始过拟合
-    per_device_train_batch_size=2,    # 8×A100，每卡 batch_size=2
-    gradient_accumulation_steps=8,   # 等效batch_size = 2×8×8卡 = 128
-    learning_rate=5e-5,               # Cosine退火的初始学习率
-    lr_scheduler_type="cosine",       # Cosine退火：避免最后阶段学习率过高扰乱权重
-    warmup_ratio=0.05,               # 5%的步数用于warmup
+    num_train_epochs=3,  # 3个Epoch：实验发现2个Epoch欠拟合，4个开始过拟合
+    per_device_train_batch_size=2,  # 8×A100，每卡 batch_size=2
+    gradient_accumulation_steps=8,  # 等效batch_size = 2×8×8卡 = 128
+    learning_rate=5e-5,  # Cosine退火的初始学习率
+    lr_scheduler_type="cosine",  # Cosine退火：避免最后阶段学习率过高扰乱权重
+    warmup_ratio=0.05,  # 5%的步数用于warmup
     fp16=False,
-    bf16=True,                        # A100支持BF16，比FP16数值更稳定
-    gradient_checkpointing=True,      # 以计算换显存，减少约40%显存占用
+    bf16=True,  # A100支持BF16，比FP16数值更稳定
+    gradient_checkpointing=True,  # 以计算换显存，减少约40%显存占用
     dataloader_num_workers=4,
     # FlashAttention-2：重新计算 attention 而不存储，显存节省约 50%
     attn_implementation="flash_attention_2",
@@ -351,7 +356,7 @@ training_args = TrainingArguments(
 
 **`r=64` 的选择逻辑**：
 
-通信测试场景的任务多样性高（切换、干扰、容量、信道等），需要较高的 LoRA 秩来捕捉足够的任务变化。实验对比（BF16 全精度加载，显存增量为 LoRA 参数本身）：
+通信测试场景的任务多样性高（切换、干扰、容量、信道等），需要较高的 LoRA 秩来捕捉足够的任务变化。实验对比（BF16 精度加载，显存增量为 LoRA 参数本身）：
 
 | r 值 | 格式合规率 | 术语准确率 | LoRA 参数显存增量 |
 |:---|:---|:---|:---|
@@ -360,7 +365,7 @@ training_args = TrainingArguments(
 | **64** | **96.7%** | **91.3%** | **+2.0GB** |
 | 128 | 96.9% | 91.5% | +4.0GB |
 
-`r=64` 是性能和显存的最优平衡点，从 64 到 128 的提升微乎其微但 LoRA 参数量翻倍。由于采用 BF16 全精度，总显存瓶颈在基座模型本身（~64GB），LoRA 参数增量相对基座可忽略不计。
+`r=64` 是性能和显存的最优平衡点，从 64 到 128 的提升微乎其微但 LoRA 参数量翻倍。由于采用 BF16 精度，总显存瓶颈在基座模型本身（~64GB），LoRA 参数增量相对基座可忽略不计。
 
 ### 3.5 DeepSpeed ZeRO-3 配置
 
@@ -570,7 +575,7 @@ DPO 前后对比（在安全评测集上）：
 
 **高危场景阻断率 96.8% → 结合 Guardrail 双缝检测达到生产要求的 100%**：
 
-DPO 让模型主动回避高危操作（模型层防护），Guardrail 节点做关键词二次过滤（系统层防护），两层叠加保证 100% 阻断率。不能只靠其中一层——DPO 防"聪明绕过"，Guardrail 防"意外漏网"。
+DPO 让模型主动回避高危操作（模型层防护），Guardrail 节点做关键词二次过滤（系统层防护），两层叠加可降低风险，但不能保证对所有未来输入 100% 阻断；测试集结果与生产安全要求需分开。不能只靠其中一层——DPO 防"聪明绕过"，Guardrail 防"意外漏网"。
 
 **为什么格式合规率略微下降（-0.6pp）**：
 
@@ -701,7 +706,7 @@ SFT + DPO 不是一次性的工作，而是持续演进的飞轮：
 
 不是。r 值控制低秩矩阵的表达能力，但存在收益递减和参数量膨胀的权衡。在本项目中实验发现 r=64 是最优点，r=128 性能几乎没有提升但 LoRA 参数量翻倍。建议从 r=16 开始实验，逐步增大直到验证集性能不再提升。
 
-注意：使用标准 LoRA（BF16 全精度）时，显存的主要瓶颈是基座模型本身（32B × 2 bytes ≈ 64GB），LoRA 参数增量（r=64 约 2GB）相对基座可忽略不计。因此 r 值对显存的影响远小于对 QLoRA 的影响，可以适当选择更大的 r 值而不用过分担心显存压力。
+注意：使用标准 LoRA（BF16 精度）时，显存的主要瓶颈是基座模型本身（32B × 2 bytes ≈ 64GB），LoRA 参数增量（r=64 约 2GB）相对基座可忽略不计。因此 r 值对显存的影响远小于对 QLoRA 的影响，可以适当选择更大的 r 值而不用过分担心显存压力。
 
 ### Q2：DPO 训练后为什么有时候模型变笨了？
 

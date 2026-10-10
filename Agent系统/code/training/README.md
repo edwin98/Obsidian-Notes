@@ -1,5 +1,8 @@
 # Agent 模型后训练：SFT + DPO 完整流水线
 
+> [!note] 记录口径（2026-10-10 修订）
+> 文中包含设计方案、历史配置与效果数字。未关联数据集版本、运行 ID、checkpoint 或评测日志的数字需核实，不直接作为实测结论；本地示例代码与生产部署状态分别说明。
+
 对应笔记：`Agent系统/04_Agent模型后训练SFT_DPO.md`
 
 ---
@@ -19,7 +22,7 @@ Step 2: 数据清洗      clean_data.py
         │
         ▼
 Step 3: SFT 微调      train_sft.py + deepspeed_config.json
-        Qwen3-32B + QLoRA (r=64) + DeepSpeed ZeRO-3
+        Qwen3-32B + LoRA（BF16 加载，无 4-bit 量化） (r=64) + DeepSpeed ZeRO-3
         → Qwen3-32B-5G-SFT（格式合规率 71% → 97%）
         │
         ▼
@@ -40,7 +43,7 @@ Step 5: DPO 训练      train_dpo.py
 |:---|:---|
 | `generate_sft_data.py` | Self-Instruct 指令扩增 + Magpie 对话生成 |
 | `clean_data.py` | 格式校验、质量过滤、去重、污染检测、分布校正 |
-| `train_sft.py` | Qwen3-32B QLoRA SFT 训练主脚本 |
+| `train_sft.py` | Qwen3-32B LoRA（BF16 加载，无 4-bit 量化） SFT 训练主脚本 |
 | `prepare_dpo_data.py` | HITL 数据库 → DPO 三元组（或合成偏好数据） |
 | `train_dpo.py` | DPO 偏好对齐训练主脚本 |
 | `deepspeed_config.json` | DeepSpeed ZeRO-3 + CPU 卸载配置 |
@@ -85,7 +88,7 @@ deepspeed --num_gpus=8 train_dpo.py \
 
 | 超参数 | 值 | 原因 |
 |:---|:---|:---|
-| LoRA r | 64 | r=64 → 96.7% 格式合规率（r=128 仅 +0.2%，显存翻倍） |
+| LoRA r | 64 | r=64 → 96.7% 格式合规率（历史记录 r=128 仅 +0.2%；适配器参数翻倍，总显存不一定翻倍，效果待日志核实） |
 | LoRA alpha | 128 | = 2×r，标准缩放因子 |
 | target_modules | q/v/o/gate/up proj | 覆盖注意力+MLP，不加 k_proj（扰乱位置编码） |
 | epochs | 3 | 第 3 Epoch 对难例上采样（×2），提升边界场景鲁棒性 |

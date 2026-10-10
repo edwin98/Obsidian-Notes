@@ -29,23 +29,24 @@ from aiokafka import AIOKafkaProducer
 import json
 import asyncio
 
+
 async def push_to_ingestion_pipeline(doc_metadata: dict):
     # 初始化原生异步高吞吐 Producer
     producer = AIOKafkaProducer(
-        bootstrap_servers='kafka-cluster.internal:9092',
-        value_serializer=lambda v: json.dumps(v).encode('utf-8'),
-        acks='all',               # 强一致性落盘
-        compression_type='lz4',   # 开启数据压缩，带宽友好
-        batch_size=16384          # 攒批发送
+        bootstrap_servers="kafka-cluster.internal:9092",
+        value_serializer=lambda v: json.dumps(v).encode("utf-8"),
+        acks="all",  # 等待当前 ISR 复制确认，不代表所有副本 fsync
+        compression_type="lz4",
+        max_batch_size=16384,  # AIOKafkaProducer 的攒批参数
     )
     await producer.start()
     try:
         # 发送处理任务
         await producer.send_and_wait(
-            topic="doc_ingestion_tasks", 
+            topic="doc_ingestion_tasks",
             value=doc_metadata,
             # 利用 doc_id 实现分区锁定，保证同文件语义时序相关性
-            key=doc_metadata['doc_id'].encode('utf-8') 
+            key=doc_metadata["doc_id"].encode("utf-8"),
         )
     finally:
         await producer.stop()
@@ -73,6 +74,6 @@ async def push_to_ingestion_pipeline(doc_metadata: dict):
 ### Q3: 消息怎么保证不丢失（如何实现 At-Least-Once）？
 **回答**：
 需要生产者、Broker、消费者三端配合：
-1. **生产者 (Producer)**：配置 `acks=all`（或者 `-1`），意味着必须等所有副本节点（Followers）都把数据落盘才认为发送成功；配置 `retries` 进行失败重试机制。
+1. **Producer**：`acks=all` 等待当前 ISR 中副本的复制确认，不是所有配置副本都 fsync 落盘。结合重试与幂等生产者降低重复写入；耐久性还依赖副本、ISR、选主和 broker 配置。
 2. **消息中间件端 (Broker)**：配置多副本（Replication Factor），并将 `min.insync.replicas`（最小同步副本数）设为至少大于 1，以防单点宕机丢失数据。
 3. **消费者 (Consumer)**：必须**关闭自动提交 Offset (`enable.auto.commit=false`)**。只有当文档真正在后端入库（比如写入 Milvus / MySQL）确认无误后，才在代码尾部手动提交 Offset (`commitSync()`)，防止执行中途崩溃导致位点丢失从而漏消费。

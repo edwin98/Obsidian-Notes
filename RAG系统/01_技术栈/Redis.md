@@ -9,7 +9,7 @@
 ## 1. 核心作用
 *   **多轮对话状态 (Session State)**：存储用户的历史消息、指代消解后的背景信息。
 *   **结果旁路缓存 (RAG Cache)**：缓存大模型生成的昂贵答案，减少重复计算。
-*   **语义缓存 (Semantic Cache)**：通过向量相似度判定，直接复用极度相似问题的答案。
+* **语义缓存（组件能力）**：可用相似查询复用答案，但有近似术语误命中风险；本项目历史方案停用，演示代码中仍有路径，部署状态需核实。
 *   **分布式锁 (Locking)**：在并发摄入或流式输出时，控制资源竞争，防范缓存击穿。
 
 ## 2. 核心能力
@@ -22,8 +22,8 @@
 - **防击穿实现**：针对同一热点问题（如全员关注的新政策），利用 Redis 分布式锁确保只有一个请求去调 LLM，其余请求等待并共享结果。
 - **滑动窗口维护**：基于 `RPUSH` 和 `LTRIM` 快速维护对话 Token 总量，实现动态记忆窗口。
 - **多级 Key 设计**：
-  - 精确匹配 Key: `rag:exact:{query_md5}`
-  - 会话 Key: `session:{user_id}:log`
+  - 精确缓存 Key 应包含 tenant/user 或授权范围、query、知识库与模型/Prompt 版本，避免跨权限复用和旧答案
+  - 会话 Key 应同时绑定租户、用户与会话，并由应用验证访问权限
 
 ## 4. 技术实现示例
 ```python
@@ -33,23 +33,26 @@ import json
 # 建立连接池
 redis_client = aioredis.from_url("redis://redis-cluster:6379", decode_responses=True)
 
-async def get_answer_with_cache(query_md5: str):
-    """带分布式锁防穿透的 RAG 结果获取"""
-    # 1. 尝试直接获取
-    cache = await redis_client.get(f"rag_cache:{query_md5}")
-    if cache: return cache
-    
+
+async def get_answer_with_cache(cache_scope: str, query_md5: str):
+    """cache_scope 由服务端生成，包含授权范围及知识库/模型版本。"""
+    cache_key = f"rag_cache:{cache_scope}:{query_md5}"
+    cache = await redis_client.get(cache_key)
+    if cache:
+        return cache
+
     # 2. 获取锁，防止并发下多请求同时击穿到底层大模型
-    async with redis_client.lock(f"lock:rag:{query_md5}", timeout=10, blocking_timeout=3):
+    async with redis_client.lock(f"lock:{cache_key}", timeout=10, blocking_timeout=3):
         # 3. 双重检查 (Double-Check Locking)
-        cache = await redis_client.get(f"rag_cache:{query_md5}")
-        if cache: return cache
-        
+        cache = await redis_client.get(cache_key)
+        if cache:
+            return cache
+
         # 4. 执行核心 RAG 推理 (耗时操作)
-        ans = await invoke_rag_pipeline() 
-        
+        ans = await invoke_rag_pipeline()
+
         # 5. 写入缓存并设置 24 小时过期
-        await redis_client.setex(f"rag_cache:{query_md5}", 86400, ans)
+        await redis_client.setex(cache_key, 86400, ans)
         return ans
 ```
 

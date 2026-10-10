@@ -76,13 +76,16 @@ graph TD;
 from typing import TypedDict, Annotated
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
+from langgraph.prebuilt import ToolNode
 from langchain_openai import ChatOpenAI
 from langchain_core.tools import tool
 
+
 # 1. 定义全局共享的 State 结构
-# 使用 add_messages reducer 来保证新的消息总是被追加(append)而不是覆盖
+# add_messages 按消息 ID 合并：新 ID 追加，同 ID 更新；不是无条件 append
 class AgentState(TypedDict):
     messages: Annotated[list, add_messages]
+
 
 # 2. 准备可以被模型调用的工具
 @tool
@@ -90,21 +93,22 @@ def get_weather(location: str):
     """获取指定城市的天气状况"""
     return f"{location}目前天气晴朗，气温25摄氏度。"
 
+
 tools = [get_weather]
 model = ChatOpenAI(model="gpt-4o").bind_tools(tools)
+
 
 # 3. 编写业务节点函数
 def agent_node(state: AgentState):
     # 用所有的上下文信息询问大模型
     response = model.invoke(state["messages"])
-    # 图框架会自动使用上面的 add_messages 更新逻辑把此结果追加进全局消息池
+    # add_messages 按消息 ID 合并：新 ID 追加，同 ID 更新
     return {"messages": [response]}
 
-def tool_node(state: AgentState):
-    # 实战中会使用内置的 ToolNode 处理，此处展示底层逻辑。
-    # 提取最后一条 AI 的响应，检索其 tool_calls 要求，运行对应的本地函数执行并返回结果
-    # ... mock 执行逻辑
-    return {"messages": [/* 返回包含结果的 ToolMessage 数据 */]}
+
+# ToolNode 执行 AIMessage.tool_calls，并返回对应的 ToolMessage
+tool_node = ToolNode([get_weather])
+
 
 # 4. 判定函数（条件边的路由中心）
 def should_continue(state: AgentState) -> str:
@@ -115,6 +119,7 @@ def should_continue(state: AgentState) -> str:
     # 否则直接终结整个事务流
     return END
 
+
 # 5. 组装工作流编排网图 (Graph Construction)
 workflow = StateGraph(AgentState)
 
@@ -124,7 +129,9 @@ workflow.add_node("tools", tool_node)
 
 # 设置逻辑连线
 workflow.add_edge(START, "agent")  # 启动后硬编码必定进入思考环节
-workflow.add_conditional_edges("agent", should_continue)  # 智能体抉择后交由路由判决下个站去向
+workflow.add_conditional_edges(
+    "agent", should_continue
+)  # 智能体抉择后交由路由判决下个站去向
 workflow.add_edge("tools", "agent")  # 工具跑完必须要再回抛给大模型分析结果
 
 # 6. 将蓝图编译为实体应用引擎 (此时可传入 checkpointer 提供暂停与持久化记忆能力)

@@ -1,5 +1,8 @@
 # Embedding 与 Reranker 微调全流程
 
+> [!note] 记录口径（2026-10-10 修订）
+> 文中包含设计方案、历史配置与效果数字。未关联数据集版本、运行 ID、checkpoint 或评测日志的数字需核实，不直接作为实测结论；本地示例代码与生产部署状态分别说明。
+
 > 本文以 ICT 无线领域知识问答 RAG 系统为背景，系统性地梳理 Embedding 模型和 Reranker 模型从数据集构建到上线的完整技术链路，重点阐述每个环节背后的工程逻辑与方案选型依据。
 
 ---
@@ -286,17 +289,13 @@ $$\mathcal{L} = -\log \frac{\exp(\text{sim}(q, d^+) / \tau)}{\exp(\text{sim}(q, 
 # （否则会引入假负样本污染）
 ```
 
-In-batch Negatives 的优势：无需显式构造负样本即可获得大量负例，batch size 越大效果越好（因此需要大显存 GPU 或梯度累积）。
+In-batch Negatives 利用同一次对比损失中的其他正文档作为负例；更多负例是否有益取决于假负样本、批次构造等。普通梯度累积只累加各 micro-batch 的梯度，不会自动扩大负样本池。
 
 **GradCache 技术**
 
-当 batch size 受显存限制时，用 GradCache 实现"大 batch 效果"：
+GradCache 将一个逻辑 batch 分块编码、缓存表示并对全批次计算对比损失，再分块重新前向和反向传播。它减少同时保留的编码器激活，以额外重算换取大负样本池；缓存表示/表示梯度仍占显存，不能固定说显存翻倍。
 
-```python
-# 先对所有样本做前向传播并缓存表示，再统一计算梯度
-# 将有效 batch size 从 64 扩大到 512+
-# 代价：显存翻倍（需缓存所有表示），但可以规避一次反向传播的显存峰值
-```
+双卡 DDP 默认只同步参数梯度；跨卡负样本需要损失实现额外聚合各卡表示（例如 all-gather）。[Sentence Transformers 损失文档](https://sbert.net/docs/package_reference/sentence_transformer/losses.html)。
 
 #### 2.4.2 多阶段训练策略
 
@@ -354,13 +353,13 @@ loss = (1 - alpha) * InfoNCE(query, pos, hard_negs) \
 
 **训练环境**：A30 × 2（单卡 24GB VRAM，双卡数据并行，CUDA 12.1）
 
-双卡数据并行使每步的有效样本量翻倍，结合 GradCache 进一步扩大 In-batch Negatives。
+分块大小、每卡逻辑 batch、跨卡表示聚合和优化器梯度累积是不同参数。以下为历史记录及目标口径，实际值待训练脚本和日志核实。
 
-| 超参数 | 实际取值 | 选择依据 |
+| 超参数 | 配置口径 | 选择依据 |
 |--------|----------|----------|
-| per_device_train_batch_size | 64 | 单卡 A30 24GB 实际上限 |
-| GradCache mini_batch_size | 16 | GradCache 分块大小，显存换 batch |
-| 有效 batch_size（含双卡+GradCache） | 1024 | 双卡各 512，DDP 合并后 In-batch Negatives 达 1023 |
+| per_device_train_batch_size | 历史记录为 64，需核实其是否为逻辑 batch | 双卡逻辑 batch 各 64 时全局为 128 |
+| GradCache mini_batch_size | 16（分块编码大小） | 控制激活峰值，不自动扩大逻辑 batch |
+| 全局对比 batch 目标 | 1024：需每卡逻辑 batch=512，并聚合跨卡表示 | 仅当上述条件成立时，单正例设置才有最多 1023 个其他正文档负例 |
 | learning_rate | 2e-5 | 阶段一用 2e-4，阶段二/三用 2e-5 |
 | warmup_steps | 总步数的 10% | 保护预训练权重，避免初期梯度震荡 |
 | max_seq_length（query） | 128 | Query 平均 20~50 token，128 足够 |
@@ -384,15 +383,15 @@ loss = (1 - alpha) * InfoNCE(query, pos, hard_negs) \
 
 #### 2.4.4 多维度输出支持
 
-`gte-multilingual-base` 原生支持 384 维和 768 维两种输出维度，通过在推理时指定 `output_dim` 参数即可切换，无需额外训练技巧：
+`gte-multilingual-base` 原生 768 维表示采用 Matryoshka 设计，支持前缀截断。Sentence Transformers 用 `truncate_dim`，而非 `output_dim`；截断后重新做 L2 归一化：
 
 ```python
-# 384 维（粗筛通道）
-embeddings = model.encode(texts, output_dim=384)
-
-# 768 维（精筛通道）
-embeddings = model.encode(texts, output_dim=768)
+# model 为已加载的 SentenceTransformer，texts 为待编码文本
+embeddings_384 = model.encode(texts, truncate_dim=384, normalize_embeddings=True)
+embeddings_768 = model.encode(texts, truncate_dim=768, normalize_embeddings=True)
 ```
+
+384 维主要减少向量存储、传输和检索计算；编码器仍执行完整前向，不能据此声称编码耗时减半。领域微调若需保留各截断维度效果，应联合优化对应前缀损失并分别验证，不能只训练 768 维就保证全部小维度效果。
 
 这使得同一个微调后的模型可以直接服务 384 维粗筛和 768 维精筛两个通道，节省部署和维护成本。
 
@@ -402,7 +401,7 @@ embeddings = model.encode(texts, output_dim=768)
 
 在独立的测试集上评测以下指标：
 
-- **Recall@K**：前 K 个召回结果中正样本的比例（K=5, 10, 20）。最重要的指标，直接对应 RAG 的上游表现
+- **Recall@K**：Top K 命中的相关文档数 / 全部相关文档数，再对查询取平均；除以 K 是 Precision@K，是否至少命中一个则是 Hit@K（K=5, 10, 20）。
 - **MRR@K**（Mean Reciprocal Rank）：正样本排名倒数的均值，衡量正样本排名的平均位置
 - **NDCG@K**：考虑位置权重的归一化折现累积增益，适合多正样本场景（详见下方算法）
 
@@ -434,7 +433,7 @@ IDCG@5 = (2¹-1)/log₂(2) + (2¹-1)/log₂(3) = 1.0 + 0.63 = 1.63  （理想：
 NDCG@5 = 1.5 / 1.63 ≈ 0.920
 ```
 
-**为什么 RAG 用 NDCG 而不只用 Recall**：Recall@K 只关心 "正样本是否召回"，不区分排第 1 还是排第 K；而 LLM 读取检索结果时会受位置偏差影响（前几个文档贡献更大），NDCG 的位置折现正好与此对齐。
+**为什么 RAG 用 NDCG 而不只用 Recall**：Recall@K 衡量相关文档覆盖比例，不区分排第 1 还是排第 K；而 LLM 读取检索结果时会受位置偏差影响（前几个文档贡献更大），NDCG 的位置折现正好与此对齐。
 
 **注意**：不要用 Cosine Similarity 的均值来评测，这和下游任务相关性弱；应用排序类指标。
 
@@ -617,40 +616,15 @@ ANNOTATION_PROMPT = """
 
 #### 3.4.1 微调策略：全量 SFT vs LoRA
 
-对于 Cross-Encoder 架构的 Reranker，选择**全量参数微调（Full Parameter SFT）**而非 LoRA。
+本节讨论 **全量参数微调 + listwise loss** 候选；概要另记录 **LoRA + Margin MSE**。没有关联运行日志与 checkpoint，不能将两者同时描述为最终线上方案。
 
-**为什么 Reranker 选全量微调：**
+**选择全量微调的可检验理由**：
 
-**1. 参数量小，全量可承受**
+- 0.3B 级模型较小，全量训练可能符合资源预算；但必须计入梯度、优化器、激活和临时缓冲，不能只比较权重显存。两个 FP32 Adam 动量项按 305M 参数约为 2.44 GB，额外 FP32 主权重另算。
+- 全量更新允许更多参数适应领域；是否优于 LoRA，需要固定数据与计算预算比较领域排序效果和通用能力。
+- 全量 checkpoint 部署直接；LoRA 也可在适用模型上合并权重，不必增加逐请求推理开销。
 
-`gte-multilingual-reranker-0.3B` 只有 305M 参数，fp16 精度下仅占约 0.6 GB 显存。单张 A10G（24 GB）加载模型后，剩余空间完全容纳 batch_size=32 时的激活值（约 8~12 GB）和 AdamW 优化器状态（约 1.2 GB）。LoRA 节省显存的核心价值在此规模下不体现。
-
-**2. 领域偏移幅度大，需要全层适配**
-
-预训练 Reranker 在通用语料（MSMARCO、Wikipedia）上对齐，而目标域是 ICT 无线协议文档（5G NR、LTE、PDCP/RLC 技术规范）。这类领域偏移要求**每一层同时适应**：
-
-- 底层 token embedding：专有术语（HARQ、MCS、PDCCH 等缩写）在通用词表中表示偏差
-- 中间 attention 层：key/query/value 矩阵需要学会对技术关键词做精确 attend（如数值参数、条件约束）
-- 顶层分类头：相关性打分的分布需要重新校准
-
-LoRA 仅在高层 attention 的 K/Q 矩阵插入低秩适配器，底层特征提取几乎不变，容易出现"上层学会打分但底层特征错位"的情况。
-
-**3. Listwise Loss 需要梯度全局传播**
-
-Listwise Softmax Loss 的梯度需要同时流过所有 (query, doc) pair 的 token 表示。若只更新 LoRA 插入的低秩矩阵而无法修改 LayerNorm 参数和 FFN 权重，模型的打分分数分布会不稳定，后续 Platt Scaling 校准效果也会打折扣。
-
-**4. 推理无额外开销**
-
-全量微调直接输出干净的 checkpoint，部署时无需处理 LoRA adapter 合并逻辑，减少上线风险。
-
-**何时改用 LoRA：**
-
-| 场景          | 说明                                              |
-| ----------- | ----------------------------------------------- |
-| 基座换成 1B+ 模型 | 如 Qwen2.5-1.5B 作 LLM-as-Reranker，全量微调显存不足       |
-| 多领域独立适配     | 共享一个基础 Reranker，每个业务线用独立 LoRA adapter，节省存储和推理资源 |
-| 快速实验验证      | 验证某个数据构建方案是否有效，用 LoRA 降低每次实验成本（训练时间减半）          |
-| 资源极度受限      | 只有单张 16 GB GPU，无法放下全量微调的优化器状态                   |
+**LoRA 与 listwise loss 兼容**：LoRA 可配置任意支持的层和 Linear 模块，并非只能用于高层 Q/K。冻结基座权重不阻止梯度通过计算图流向适配器，listwise 损失不要求更新所有参数。资源有限、多领域适配或快速实验时都可比较 LoRA；训练时间和质量收益需要实测。
 
 **全量 SFT vs LoRA 实测对比（305M 模型，2× A10G）：**
 
@@ -766,7 +740,7 @@ D6：介绍天线端口映射的段落               ← 随机负样本
 
 - **BCE（Pointwise）的视角**：独立判断每个文档"是否相关"。D1 = 1，D2 可能 = 1，D3~D6 = 0。问题在于 D1 和 D2 的分数都被推向 1，但它们之间的相对排序没有被显式建模。最终 D2 可能排在 D1 前面，但 BCE 对此没有惩罚。
 - **Pairwise 的视角**：比较 (D1, D3)、(D1, D4)、(D1, D5)、(D1, D6) 这些正负对。每次只看一对，D3 的分数不知道 D4 的存在，训练信号相互独立。需要枚举 M×N 对（M 个正样本，N 个负样本），训练效率低。
-- **Listwise 的视角**：把 [D1, D2, D3, D4, D5, D6] 视为一个完整列表，做一次 Softmax。D1 的得分直接和所有其他文档竞争，D3 得分高了就会"抢走"D1 的概率质量，产生直接的梯度惩罚。一次前向传播等效于 C(6,2)=15 次 Pairwise 比较的信息量。
+- **Listwise 的视角**：把 [D1, D2, D3, D4, D5, D6] 视为一个完整列表，做一次 Softmax。D1 的得分直接和所有其他文档竞争，D3 得分高了就会"抢走"D1 的概率质量，产生直接的梯度惩罚。它联合优化列表内竞争关系，但不能等同为固定数量的 pairwise 比较信息量。
 
 **为什么不用 LambdaRank / LambdaMART 类方案**
 
@@ -781,11 +755,11 @@ Listwise Softmax 在 PyTorch 里就是一个标准的 `cross_entropy` 调用，�
 
 Embedding 用 InfoNCE，Reranker 用 Listwise Softmax，两者看起来很像（都是 Softmax + 负样本），但有一个关键区别：Embedding 的 InfoNCE 假设每个样本只有一个正文档，而 Reranker 的候选列表里可能有多个相关程度不同的正文档（D1 强相关、D2 弱相关）。
 
-InfoNCE 的标准实现只允许一个正样本，如果强行把 D1 和 D2 都设为正样本，公式退化且无法区分它们的相对质量。Listwise Softmax 支持连续分数的软标签（通过分数加权的 label 分布），天然兼容多正样本、多级相关度的场景。
+常见单正例 InfoNCE 实现只指定一个目标，但可扩展为多正例对比学习，并非数学上禁止多个正样本。候选列表内的 softmax 交叉熵与对比损失有相近形式；本方案可使用按相关度构造的目标分布表达多级相关性，应明确标签归一化与损失定义。
 
 #### 3.4.4 Score Calibration（分数校准）
 
-Reranker 输出的分数如果没有校准，仅能用于相对排序，不能用于设置阈值过滤。校准的目标是让分数具有概率含义（P(相关 | query, doc)）：
+未校准的 Reranker 分数也可在验证集上选择过滤阈值，但不能直接解释为相关概率，模型或数据变化后应重验阈值。校准的目标是让分数具有概率含义（P(相关 | query, doc)）：
 
 ```python
 # Platt Scaling：用 Logistic Regression 对 Reranker 原始分数做校准
@@ -891,7 +865,7 @@ Reranker 的训练数据 = Embedding 召回的结果
 
 - **候选集截断**：Reranker 输入候选数量设置为 50（而非 100+），在准确率和延迟间取平衡
 - **序列长度控制**：超长文档截断时，保留前 128 token（通常是标题+导语，信息密度最高）+ 最后 128 token（通常是总结），而非简单截断前 512 token
-- **缓存策略**：对高频 query（Top 1000）的 Reranker 结果做 Redis 缓存，TTL = 1 小时，命中率约 15%~20%
+- **缓存候选（上线状态待核实）**：可对高频 query 的重排结果做缓存；key 需包含租户/授权范围、query、候选集与文档版本、模型版本。TTL 和命中率需实测，不能把历史设想中的 1 小时、15%～20% 当作已验证结果。
 
 ### 5.3 持续迭代机制
 

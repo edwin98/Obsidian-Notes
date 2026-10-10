@@ -20,36 +20,36 @@ Pydantic 是本项目逻辑层的“护城河”，负责将凌乱的非结构�
 ## 3. 常见用法
 - **BaseModel 子类化**：定义业务实体。
 - **Field 语义化定义**：通过 `Field` 的 `description` 描述参数含义，这些描述会直接渲染在 Swagger 开发文档上。
-- **Config 配置**：使用 `frozen=True` 创建不可变对象，确保在复杂的 RAG 调度链路中参数不被中途篡改。
+- **ConfigDict 配置**：V2 使用 `model_config`；`frozen=True` 禁止字段重新赋值，但不会递归冻结字段内的 list/dict。
 
 ## 4. 技术实现示例
 ```python
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
 
 class RAGQueryRequest(BaseModel):
     """
     RAG 检索请求规范模型
     """
+
     user_id: str = Field(..., max_length=50, description="唯一用户标识")
     query: str = Field(..., min_length=2, max_length=1000, description="原始提问文本")
     top_k: int = Field(default=80, ge=10, le=200, description="粗筛召回数量")
-    
+
     # 业务逻辑校验：严禁包含敏感词
-    @field_validator('query')
+    @field_validator("query")
     @classmethod
     def query_must_be_safe(cls, v: str) -> str:
         if "敏感词库" in v:
-            raise ValueError('Query contains sensitive terms')
+            raise ValueError("Query contains sensitive terms")
         return v
-    
-    class Config:
-        frozen = True # 设置为不可变对象，保障业务链横向传递安全
-        extra = "forbid" # 禁止传入未定义的额外参数，防止参数注入攻击
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 ```
 
 ## 5. 注意事项与坑点
 - **V1 与 V2 的差异**：Pydantic V2 进行了重构，很多装饰器从 `@validator` 变成了 `@field_validator`。本项目由于追求极致性能，建议统一使用 **V2.x**。
-- **Lazy Evaluation 坑**：在复杂的嵌套模型中，有时会出现递归引用的问题，需使用 `Model.update_forward_refs()` 显式解决。
+- **前向引用**：V2 在需要手动解析未完成的类型引用时使用 `Model.model_rebuild()`；`update_forward_refs()` 是 V1 API。
 - **性能过度损耗**：在极其频繁的内循环中（如处理千万行文本行）使用 Pydantic 会有一定 overhead。对于纯原始数据处理，应优先使用原生 `dict`。
 
 ## 6. Pydantic 常见面试问题及回答
@@ -62,7 +62,7 @@ class RAGQueryRequest(BaseModel):
 ### Q2: 如果对方传入了多余的或不在定义中的 JSON 字段，Pydantic 会怎么处理？如何防范参数注入？
 **回答**：
 - **默认行为**：Pydantic 默认采取极具包容性的 `ignore` 策略。它会将不认识的额外参数直接忽略丢弃，不会报错，也不会纳入最终的实例属性中。
-- **防范注入（严格模式）**：在企业级开发中，为了防止恶意用户构造多余参数进行试探或污染，我们必须在模型的内部配置类中使用 `Config` 开启严格模式：`extra = "forbid"`。这样一旦前端传入了未在 schema 上的字段，Pydantic 会立刻阻断请求并抛出 422 Unprocessable Entity 的数据验证异常。
+- **额外字段与严格类型分开配置**：`ConfigDict(extra="forbid")` 拒绝未声明字段；`strict=True` 才控制严格类型校验。Pydantic 抛出 `ValidationError`，FastAPI 默认将请求校验失败转换为 HTTP 422，二者不是同一种异常。
 
 ### Q3: FastAPI 和 Pydantic 是如何梦幻联动的？
 **回答**：

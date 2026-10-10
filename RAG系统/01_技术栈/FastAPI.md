@@ -55,7 +55,7 @@ async def chat_stream_endpoint(query: str):
 
 ## 5. 注意事项与坑点
 - **长连接超时**：网关（如 Nginx 或企业网关）默认可能有 60s 的超时阈值。由于 Reranker + LLM 过程可能很长，需同步调整网关的 `proxy_read_timeout`。
-- **阻塞同步调用**：如果代码中调用了不支持异步的 `requests` 库或密集型计算函数，必须使用 `run_in_executor` 扔进进程池，否则会锁死 FastAPI 的事件循环，导致其他请求全部卡死。
+- **阻塞调用**：`loop.run_in_executor(None, func)` 默认使用线程池，`asyncio.to_thread` 也使用线程。纯 Python CPU 密集计算可显式使用 `ProcessPoolExecutor` 或独立 worker；在 `async def` 中直接运行阻塞函数会阻塞事件循环。
 - **内存泄漏**：在流式生成中，由于 generator 保持了较长时间的变量引用，需注意对象的周期释放。
 - **Uvicorn 配置**：生产环境务必开启 `--workers` 多进程模式，并配合 `prometheus-fastapi-instrumentator` 监控服务健康。
 

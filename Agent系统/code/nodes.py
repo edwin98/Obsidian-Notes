@@ -51,14 +51,16 @@ from tools import TOOL_MAP, TOOLS
 logger = logging.getLogger(__name__)
 
 
-# ── 统计检验工具（纯标准库，无需 scipy）────────────────────────────────────────
+# ── 演示规则与正态近似（不是正式 T/KS 检验）──────────────────────────────────
 
 
-def _ttest_ind(sample: list[float], baseline_mean: float, baseline_std: float) -> float:
+def _approx_one_sample_pvalue(
+    sample: list[float], baseline_mean: float, baseline_std: float
+) -> float:
     """
-    单样本 t 检验（样本 vs 已知总体均值）。
-    返回双尾 p 值近似值（基于 t 分布自由度 n-1）。
-    当 p < 0.05 且均值下降 > 5% 时判定为回归。
+    基于样本标准误的双尾正态近似演示，不是 Student t 检验。
+    n < 2 时返回 1.0 作为兼容占位，不表示无差异或通过检验。
+    baseline_std 仅用于兼容已有调用；正式检验需原始重复观测。
     """
     n = len(sample)
     if n < 2 or baseline_std == 0:
@@ -67,16 +69,16 @@ def _ttest_ind(sample: list[float], baseline_mean: float, baseline_std: float) -
     sample_var = sum((x - sample_mean) ** 2 for x in sample) / (n - 1)
     se = math.sqrt(sample_var / n) if sample_var > 0 else 1e-9
     t_stat = (sample_mean - baseline_mean) / se
-    # 用 t 分布的正态近似计算 p 值（n 较大时误差 < 0.01）
+    # 正态近似的误差依赖样本数与分布，没有统一 < 0.01 保证
     z = abs(t_stat)
     p_approx = 2 * (1 - _norm_cdf(z))
     return p_approx
 
 
-def _ks_test_uniform(sample: list[float], low: float, high: float) -> float:
+def _out_of_envelope_rate(sample: list[float], low: float, high: float) -> float:
     """
-    KS 检验：检测样本是否超出 [low, high] 包络。
-    返回超出包络的样本比例（0 = 完全在包络内）。
+    返回超出 [low, high] 包络的样本比例。
+    这不是 KS 统计量或 p 值；0 只表示给定样本未越界。
     """
     if not sample:
         return 0.0
@@ -453,7 +455,7 @@ def result_judge_node(state: AgentState) -> dict:
     tool_outputs = state.get("tool_outputs", {})
 
     # ── Statistical track ────────────────────────────────────────────────────
-    # 统计轨：硬规则 + T-Test/KS-Test 双重校验
+    # 演示轨：硬阈值 + 包络；没有完整统计显著性检验
     # 原则：明显违规直接 FAIL，不依赖 LLM 判断
     stat_issues = []
 
@@ -473,8 +475,8 @@ def result_judge_node(state: AgentState) -> dict:
         if tool_outputs["log_analyzer"].get("severity") == "HIGH" and not anomalies:
             stat_issues.append("log_analyzer: severity HIGH with no explicit anomaly")
 
-    # 3. simulation_runner 通过率 T-Test 检验
-    # 基线：pass_rate 均值 0.99，标准差 0.02（来自历史压测数据）
+    # 3. simulation_runner 通过率演示规则
+    # 示例基线常量，实际值需从有版本记录的原始数据估计
     BASELINE_PASS_RATE_MEAN = 0.99
     BASELINE_PASS_RATE_STD = 0.02
     if "simulation_runner" in tool_outputs:
@@ -485,21 +487,23 @@ def result_judge_node(state: AgentState) -> dict:
             stat_issues.append(
                 f"simulation pass_rate {pass_rate:.1%} below hard threshold 80%"
             )
-        # T-Test：pass_rate 与基线均值做显著性检验
+        # 正态近似占位路径：当前单点输入不足以做显著性检验
         elif pass_rate < BASELINE_PASS_RATE_MEAN:
-            # 用单点样本近似（生产中应收集多次运行数据）
+            # 仅有一个聚合值，下方近似函数返回 1.0；不能当作真实 p 值
             sample = [pass_rate]
-            p_val = _ttest_ind(sample, BASELINE_PASS_RATE_MEAN, BASELINE_PASS_RATE_STD)
+            p_val = _approx_one_sample_pvalue(
+                sample, BASELINE_PASS_RATE_MEAN, BASELINE_PASS_RATE_STD
+            )
             decline_pct = (
                 BASELINE_PASS_RATE_MEAN - pass_rate
             ) / BASELINE_PASS_RATE_MEAN
             if p_val < 0.05 and decline_pct > 0.05:
                 stat_issues.append(
-                    f"T-Test: pass_rate {pass_rate:.1%} significantly below baseline "
+                    f"Normal approximation: pass_rate {pass_rate:.1%} significantly below baseline "
                     f"{BASELINE_PASS_RATE_MEAN:.1%} (p={p_val:.3f}, decline={decline_pct:.1%})"
                 )
 
-    # 4. metrics_collector KPI 包络 KS-Test 检验
+    # 4. metrics_collector KPI 包络规则，不是 KS-Test
     # 基线包络：throughput [80, 300] Mbps，latency_p99 [0, 30] ms
     if "metrics_collector" in tool_outputs:
         mc = tool_outputs["metrics_collector"]
@@ -508,17 +512,17 @@ def result_judge_node(state: AgentState) -> dict:
         pkt_loss = mc.get("packet_loss_rate", 0.0)
 
         # 吞吐量包络检验
-        tp_out_rate = _ks_test_uniform([throughput], low=80.0, high=300.0)
+        tp_out_rate = _out_of_envelope_rate([throughput], low=80.0, high=300.0)
         if tp_out_rate > 0:
             stat_issues.append(
-                f"KS-Test: throughput {throughput:.1f} Mbps out of envelope [80, 300]"
+                f"Envelope: throughput {throughput:.1f} Mbps out of envelope [80, 300]"
             )
 
         # P99 延迟包络检验
-        lat_out_rate = _ks_test_uniform([latency_p99], low=0.0, high=30.0)
+        lat_out_rate = _out_of_envelope_rate([latency_p99], low=0.0, high=30.0)
         if lat_out_rate > 0:
             stat_issues.append(
-                f"KS-Test: P99 latency {latency_p99:.1f} ms exceeds envelope [0, 30]"
+                f"Envelope: P99 latency {latency_p99:.1f} ms exceeds envelope [0, 30]"
             )
 
         # 丢包率硬规则

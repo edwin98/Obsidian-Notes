@@ -13,7 +13,7 @@
 # 大模型基础知识
 - [ ] PPO\GRPO的区别
 - [ ] 读deepseek的技术报告
-- [ ] vllm的核心原理：PageAttention
+- [ ] vllm的核心原理：PagedAttention
 - [ ] Slide Window attention
 - [x] RoPE[[杂七杂八技术#RoPE编码]]
 - [x] CoT ToT GoT[[杂七杂八技术#CoT、ToT、GoT]]

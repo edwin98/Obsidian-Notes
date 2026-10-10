@@ -20,11 +20,11 @@ START → agent → guardrail → tools → agent (ReAct 循环)
 | `guardrail` | 检测危险操作，触发 HITL 拦截 |
 | `tools` | 执行工具调用，缓存结果至 `tool_outputs` |
 | `hitl` | 人工介入节点（生产模式暂停等待审批） |
-| `result_judge` | 双轨判定：统计规则 + LLM 语义综合 |
+| `result_judge` | 阈值/包络演示规则 + LLM 语义综合，未实现正式 T/KS 检验 |
 
 **熔断机制**
 
-- 硬熔断：`recursion_limit=15`，超出强制终止
+- 硬上限：`recursion_limit=15` 限制 super-step 数，超限抛出 `GraphRecursionError`；应用另行安排告警/人工处理
 - 软熔断：连续工具错误 >= 2 次，或置信度 < 0.65，触发 HITL
 
 ## 快速开始

@@ -9,6 +9,11 @@ status: active
 
 # 5G 无线网络智能测试验证 Agent 系统 — 全景报告
 
+> [!note] 记录口径（2026-10-10 修订）
+> 文中包含设计方案、历史配置与效果数字。未关联数据集版本、运行 ID、checkpoint 或评测日志的数字需核实，不直接作为实测结论；本地示例代码与生产部署状态分别说明。
+
+**设计与示例代码的区别**：本节的 T-Test/KS-Test 是待实现或验证的统计方案。当前 `code/nodes.py` 使用硬阈值、包络越界规则及一个正态近似演示函数；单个 pass_rate 无法做显著性检验，越界比例也不是 KS 统计量或 p 值。正式检验需收集多次运行的原始样本，按配对关系和分布选择方法，例如 SciPy 的 ttest_1samp/ttest_ind/ttest_rel、ks_2samp，并报告置信区间、效应量与多重比较处理。
+
 > 本文档是系统设计全景文档，涵盖概念框架、技术架构、关键模块、工程实现与业务成果。
 > 评测体系详见 [[03_Agent评测体系设计]]，模型后训练详见 [[04_Agent模型后训练SFT_DPO]]。
 
@@ -244,16 +249,16 @@ Guardrail 节点是本系统与教科书式 ReAct 最关键的工程差异：**�
 1. **规则层**：正则扫描工具参数，命中高危关键词白名单（`format_c`、`reset_all`、`force_reboot`、`wipe`、`delete_all` 等）
 2. **分类层**：轻量级安全分类模型（基于 Qwen3-4B SFT 或参考 LlamaGuard 思想）二次确认，防止关键词被改写绕过
 
-**触发后的处置**：路由至 HITL 节点，State 快照序列化，释放 GPU 资源，Celery 异步推送钉钉告警。
+**触发后的处置**：路由至 HITL，checkpointer 持久化状态，当前图调用返回，异步通知专家；常驻推理服务不会自动释放 GPU。
 
 ### 5.3 双重熔断机制
 
 | 层级 | 触发条件 | 实现方式 | 处置 |
 |:---|:---|:---|:---|
-| **硬熔断** | 图迭代深度 > 阈值（如 15 跳）| LangGraph `recursion_limit` | 强制挂起，上报异常 |
+| **硬上限** | 超过图 super-step 上限（如 15） | LangGraph `recursion_limit` | 抛出 GraphRecursionError，由应用捕获处理 |
 | **软熔断** | 连续工具错误 ≥ 3 次，或 `confidence_score` < 0.65 | State 字段路由判断 | 路由至 HITL |
 
-**置信度阈值 0.65 的来源**：通过大量压测找到相变点——低于此值时 Agent 自主执行错误率急剧上升，不是拍脑袋定的。阈值需要随领域数据积累持续校准。
+**置信度阈值口径**：0.65 是历史设计阈值，缺少对应验证集和压测日志时不能宣称已找到相变点。LLM 自报分数不是校准概率，应按任务与模型版本统计正确率、误放行率和人工介入率，验证阈值；低分路由 HITL 时，提高阈值会使更多任务进入人工审批。
 
 **两层的必要性**：硬熔断防死循环（递归爆炸），软熔断防幻觉递推（模型自信但错误的连续决策）。二者解决的是不同类型的失控场景。
 
@@ -273,7 +278,7 @@ while not approved:
 State 快照序列化 → Postgres（Thread_ID 作为主键）
   │
   ▼
-释放计算资源（进程终止，GPU 显存释放）
+当前图调用返回，任务等待审批（进程和 GPU 常驻服务仍可运行）
   │
   ▼
 Celery 异步触发钉钉 Webhook 告警（含用例详情、拦截原因）
@@ -282,11 +287,13 @@ Celery 异步触发钉钉 Webhook 告警（含用例详情、拦截原因）
 专家 Web 前端：Review 参数 → 修改异常值 → 点击 Approve
   │
   ▼
-/resume API → 从 Postgres 拉取 Thread_ID 对应 State → .resume()
+/resume API → 同一 thread_id 下恢复：静态断点 update_state + invoke(None)，动态中断 Command(resume=...)
   │
   ▼
 Agent 从断点继续执行，携带人工修正后的参数
 ```
+
+持久化 checkpointer 保存状态后，当前图调用返回并等待审批，不自动终止进程或卸载常驻 GPU 模型。静态 interrupt_before 断点：同一 thread_id 下先 update_state，再 invoke(None, config)；动态 interrupt()：invoke(Command(resume=审批结果), config)。应用负责鉴权、任务归属校验和参数校验，动态中断恢复会重执行节点，中断前副作用需幂等。
 
 **HITL 解决的三类业务问题**：
 
@@ -469,7 +476,7 @@ Agent 系统的降级不是简单的"报错返回"，而是一套**分层、可�
 
 适用于连续错误超限、置信度低、高危操作（见 5.3、5.4）：
 
-- State 持久化，GPU 资源释放，异步告警
+- State 持久化，当前图调用返回等待审批，异步告警
 - 人工修正参数后从断点精确恢复，不丢失任何已完成步骤
 - SLA 超时阈值（如 2 小时无人响应）触发向下降级到 L3/L4
 
@@ -493,7 +500,7 @@ async def call_with_fallback(prompt, tools):
     raise AllModelsUnavailableError()
 ```
 
-**降级代价要透明**：小模型 tool call 稳定性差，降级时应收窄工具集（只开放低风险工具），同时降低置信度阈值触发更多 HITL。
+**降级策略**：小模型表现需单独评测；收窄工具集并在低分触发 HITL 的策略下提高置信度阈值，以增加人工介入。
 
 #### L4：规则引擎兜底
 
@@ -601,7 +608,7 @@ def fail_safe(state: AgentState, reason: str):
 
 通用基座模型在 5G 测试领域面临三个核心问题：**领域术语理解不足**、**结构化格式输出不稳定**、**危险逻辑幻觉**。
 
-- **SFT**：用约 5 万条 Golden Dataset 微调，将通信术语映射和严格 JSON 格式的"肌肉记忆"烙印到模型权重，DeepSpeed ZeRO-3 + QLoRA 在 8×A100 上约 14 小时完成
+- **SFT**：本地训练脚本采用 BF16 LoRA + DeepSpeed ZeRO-3，未启用 4-bit QLoRA；约 5 万条数据、8×A100 和 14 小时属于历史记录，需实际运行日志支持。
 - **DPO**：HITL 是天然的偏好数据采集器，被打回的高危用例为负样本，专家修正后为正样本，绕过复杂 Reward Model 直接做偏好对齐
 
 > 详细数据生成、训练配置、方案选型逻辑见 [[04_Agent模型后训练SFT_DPO]]
@@ -665,17 +672,17 @@ LangGraph 的三个核心优势：
 
 ### Q4：置信度阈值 0.65 怎么来的？
 
-通过压测找到**相变点**——低于 0.65 时 Agent 自主执行错误率急剧上升，不是主观设定。阈值需随领域数据积累持续校准。
+**置信度阈值口径**：0.65 是历史设计阈值，缺少对应验证集和压测日志时不能宣称已找到相变点。LLM 自报分数不是校准概率，应按任务与模型版本统计正确率、误放行率和人工介入率，验证阈值；低分路由 HITL 时，提高阈值会使更多任务进入人工审批。
 
 ### Q5：HITL 在工程上如何不阻塞线程？
 
-LangGraph `interrupt_before` + Postgres Checkpoint：触发时 State 序列化写入 Postgres，进程终止释放 GPU；Celery 异步推送告警；专家 Approve 后调 API，从 Postgres 重建 State 调用 `.resume()`，整个等待期无任何资源占用。
+持久化 checkpointer 保存状态后，当前图调用返回并等待审批，不自动终止进程或卸载常驻 GPU 模型。静态 interrupt_before 断点：同一 thread_id 下先 update_state，再 invoke(None, config)；动态 interrupt()：invoke(Command(resume=审批结果), config)。应用负责鉴权、任务归属校验和参数校验，动态中断恢复会重执行节点，中断前副作用需幂等。
 
 ### Q6：系统需要后训练吗？怎么做的？
 
 必须做。通用模型是"学识渊博但缺乏领域经验的实习生"。
 
-- **SFT**：解决格式和术语，DeepSpeed ZeRO-3 + QLoRA 微调，约 14 小时
+- **SFT**：本地示例为 BF16 LoRA + ZeRO-3；实际时长与效果待日志核实
 - **DPO**：HITL 天然产生偏好数据（拦截=负样本，修正=正样本），比 RLHF 工程轻量很多
 
 ### Q7：如何客观评估长链路 Agent 系统？
@@ -696,7 +703,7 @@ LangGraph `interrupt_before` + Postgres Checkpoint：触发时 State 序列化�
 五层渐进式降级，核心思想是**能自恢复则自恢复，不能则保数据等人工，极端情况规则兜底**：
 
 - **L1（秒级）**：tool call 错误原路重试 ≤3 次，靠错误消息引导 LLM 自我修正
-- **L2（小时级）**：连续错误/低置信度触发 HITL，State 持久化后 GPU 资源释放，断点精确恢复
+- **L2（小时级）**：连续错误/低置信度触发 HITL，状态持久化后当前调用返回，审批后恢复；常驻服务仍占用资源
 - **L3（秒级切换）**：主干 32B 不可用时，Fallback 链 32B→7B→4B，同步收窄工具集降低风险
 - **L4（规则兜底）**：全模型不可用时，测试判定退化为纯统计轨（T-Test），用例生成退化为模板匹配
 - **L5（安全失败）**：所有层都覆盖不了时，标记任务为 `SUSPENDED`（非 FAILED），State 完整保留，发送高优告警，等待人工全量接管

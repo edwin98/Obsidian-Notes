@@ -1,5 +1,10 @@
 # 5G 无线网络智能测试验证 Agent 系统 — 技术深度报告
 
+> [!note] 记录口径（2026-10-10 修订）
+> 文中包含设计方案、历史配置与效果数字。未关联数据集版本、运行 ID、checkpoint 或评测日志的数字需核实，不直接作为实测结论；本地示例代码与生产部署状态分别说明。
+
+**设计与示例代码的区别**：本节的 T-Test/KS-Test 是待实现或验证的统计方案。当前 `code/nodes.py` 使用硬阈值、包络越界规则及一个正态近似演示函数；单个 pass_rate 无法做显著性检验，越界比例也不是 KS 统计量或 p 值。正式检验需收集多次运行的原始样本，按配对关系和分布选择方法，例如 SciPy 的 ttest_1samp/ttest_ind/ttest_rel、ks_2samp，并报告置信区间、效应量与多重比较处理。
+
 ---
 
 ## 一、项目背景与业务挑战
@@ -161,10 +166,10 @@ Guardrail 节点是本系统与教科书 ReAct 最核心的工程差异。工具
 
 | 层级 | 触发条件 | 实现方式 | 处置 |
 |:---|:---|:---|:---|
-| **硬熔断** | 图迭代深度 > 阈值（如 15 跳）| LangGraph `recursion_limit` | 强制挂起，上报异常 |
+| **硬上限** | 超过图 super-step 上限（如 15） | LangGraph `recursion_limit` | 抛出 GraphRecursionError，由应用捕获处理 |
 | **软熔断** | 连续工具错误 ≥ 3 次，或 `confidence_score` < 0.65 | State 字段路由判断 | 路由至 HITL |
 
-**置信度阈值 0.65 的来源**：通过压测找到相变点——低于此值时 Agent 自主执行错误率急剧上升，不是拍脑袋定的。
+**置信度阈值口径**：0.65 是历史设计阈值，缺少对应验证集和压测日志时不能宣称已找到相变点。LLM 自报分数不是校准概率，应按任务与模型版本统计正确率、误放行率和人工介入率，验证阈值；低分路由 HITL 时，提高阈值会使更多任务进入人工审批。
 
 ### 4.4 Human-in-the-Loop（HITL）工程实现
 
@@ -181,7 +186,7 @@ LangGraph 方式（正确）：
 interrupt_before 钩子：State 快照序列化写入 Postgres
   │
   ▼
-释放计算资源（进程终止，GPU 显存释放）
+当前图调用返回并等待审批，进程和常驻模型不自动退出
   │
   ▼
 Celery 异步触发钉钉 Webhook 告警
@@ -190,8 +195,10 @@ Celery 异步触发钉钉 Webhook 告警
 专家 Web 前端 Review → 修改参数 → 点击 Approve
   │
   ▼
-API 唤醒 → 从 Postgres 拉取 Thread_ID 对应 State → .resume()
+API 唤醒 → 同一 thread_id：静态断点 update_state + invoke(None)，动态中断 Command(resume=...)
 ```
+
+持久化 checkpointer 保存状态后，当前图调用返回并等待审批，不自动终止进程或卸载常驻 GPU 模型。静态 interrupt_before 断点：同一 thread_id 下先 update_state，再 invoke(None, config)；动态 interrupt()：invoke(Command(resume=审批结果), config)。应用负责鉴权、任务归属校验和参数校验，动态中断恢复会重执行节点，中断前副作用需幂等。
 
 **HITL 解决的三类业务问题**：
 
@@ -223,7 +230,7 @@ API 唤醒 → 从 Postgres 拉取 Thread_ID 对应 State → .resume()
               └─────────────────┘
 ```
 
-**统计轨具体实现**：KPI 均值/方差与历史 Baseline 采用 T-Test / KS-Test 或阈值包络策略对比，违背容忍底线直接判 FAIL。
+**设计与示例代码的区别**：本节的 T-Test/KS-Test 是待实现或验证的统计方案。当前 `code/nodes.py` 使用硬阈值、包络越界规则及一个正态近似演示函数；单个 pass_rate 无法做显著性检验，越界比例也不是 KS 统计量或 p 值。正式检验需收集多次运行的原始样本，按配对关系和分布选择方法，例如 SciPy 的 ttest_1samp/ttest_ind/ttest_rel、ks_2samp，并报告置信区间、效应量与多重比较处理。
 
 **语义轨具体实现**：Qwen3-32B 分析底层 RRC/NAS/PDCP 信令日志（PCAP 转译），能识别如"UE 上报 MeasurementReport，基站下发 RRCReconfiguration，但 SN Status Transfer 出现丢包超时"这类微观协议异常。
 
@@ -242,9 +249,9 @@ API 唤醒 → 从 Postgres 拉取 Thread_ID 对应 State → .resume()
 - HITL 沉淀的 Golden Dataset（约 5 万对齐数据）作为种子混合
 - 关键点：**故意加入失败案例**，增强模型对非理想环境的容错性
 
-**微调技术方案**（32B 量级，全参微调显存不可行）：
+**本地示例训练配置**（32B 量级；实际生产配置需日志确认）：
 ```
-DeepSpeed ZeRO-3 + QLoRA (nf4 量化)
+DeepSpeed ZeRO-3 + LoRA（BF16 加载，不做 4-bit 量化）
 LoRA 插入：q_proj, v_proj, o_proj, gate_proj, up_proj
 超参数：r=64, α=128, Dropout=0.05, lr=5e-5（Cosine 退火）
 硬件：8×A100 80G，FlashAttention-2 + Gradient Checkpointing
@@ -375,17 +382,17 @@ LangGraph 将流程抽象为**状态机**，带来三个核心优势：
 
 ### Q4：置信度阈值 0.65 怎么来的？
 
-通过压测找到**相变点**——低于 0.65 时 Agent 自主执行错误率急剧上升，不是拍脑袋定的。实操中阈值需要随领域数据积累持续校准。
+**置信度阈值口径**：0.65 是历史设计阈值，缺少对应验证集和压测日志时不能宣称已找到相变点。LLM 自报分数不是校准概率，应按任务与模型版本统计正确率、误放行率和人工介入率，验证阈值；低分路由 HITL 时，提高阈值会使更多任务进入人工审批。
 
 ### Q5：HITL 在工程上如何不阻塞线程？
 
-关键是 LangGraph 的 `interrupt_before` + Postgres Checkpoint：触发 HITL 时，State 快照序列化写入 Postgres，进程终止释放 GPU 显存；Celery 异步推送钉钉告警；专家 Approve 后 API 唤醒，从 Postgres 重建 State 调用 `.resume()` 继续执行。整个等待期间无任何资源占用。
+持久化 checkpointer 保存状态后，当前图调用返回并等待审批，不自动终止进程或卸载常驻 GPU 模型。静态 interrupt_before 断点：同一 thread_id 下先 update_state，再 invoke(None, config)；动态 interrupt()：invoke(Command(resume=审批结果), config)。应用负责鉴权、任务归属校验和参数校验，动态中断恢复会重执行节点，中断前副作用需幂等。
 
 ### Q6：系统需要后训练吗？怎么做的？
 
 必须做。通用模型是"学识渊博但没有领域经验的实习生"，在严肃的 5G 测试场景中，格式错乱和危险幻觉是不能容忍的。
 
-**SFT**：解决格式和术语，数据来自 Self-Instruct 合成 + HITL Golden Dataset，DeepSpeed ZeRO-3 + QLoRA 微调 Qwen3-32B。
+**SFT**：解决格式和术语，数据方案来自 Self-Instruct + HITL；本地 train_sft.py 使用 BF16 LoRA，历史 QLoRA 表述与脚本不符，现按本地代码更正。
 
 **DPO**：HITL 是天然的偏好数据采集器，被打回的高危用例为负样本，专家修正后为正样本，直接绕过 Reward Model 进行偏好对齐，比 RLHF 工程实现轻量很多。
 
