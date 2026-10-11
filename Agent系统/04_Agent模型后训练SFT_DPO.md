@@ -85,6 +85,14 @@ RAG 和精心设计的 System Prompt 可以缓解上述问题，但有固有局�
 
 ## 二、训练路线图
 
+### 离线偏好对齐与在线策略优化
+
+DAPO、Dr.GRPO、GSPO、SAPO、LUSPO、VESPO 分别研究采样、长度偏差、优化粒度与 off-policy 稳定性。理解这些方法时，还需看奖励能否验证、是否具备交互环境以及 rollout 成本，不能仅按方法发布时间选择。
+
+完整对照与原论文见 [[大模型对齐算法解析_PPO_DPO_DRPO等对比]]；新模型的混合架构与参数成本见 [[MoE混合专家模型技术解析]]。
+
+以下 SFT→DPO 路线与配方记录原项目实现，不表示已经使用这些在线 RL 算法。
+
 ```
 基座模型（Qwen3-32B）
        │
@@ -212,7 +220,7 @@ Golden Dataset 的价值：这些数据已经过真实执行验证，不是合�
 
 所有数据统一打包为 ChatML 格式，包含完整的系统提示、多轮对话和工具调用序列：
 
-```
+````text
 <|im_start|>system
 You are a 5G test verification agent. Follow the ReAct framework:
 - Think step by step before each action
@@ -253,12 +261,20 @@ Action: simulation_runner
 }
 ```
 <|im_end|>
-```
+````
 
 **格式设计的关键考量**：
 - 工具调用和工具返回都在训练序列中明确标注，模型学会区分"自己的输出"和"环境反馈"
 - 最终结论强制要求 JSON 格式（用代码块包裹），而不是自然语言，保证下游系统可解析
 - `confidence_score` 是必填字段，强制模型进行自我置信度评估
+
+#### 损失目标与 assistant mask
+
+当前 TRL 的 SFT 配置提供 `assistant_only_loss` 等选项，依赖模板生成正确的 assistant mask；手工屏蔽 labels 也是实现特定训练目标的方式。哪些 token 参与损失，应由任务与数据模板决定，而非只看配置名称。[SFTTrainer 文档](https://huggingface.co/docs/trl/en/sft_trainer)
+
+`processing_class` 等参数体现 Trainer 的软件演进，旧接口示例按对应版本理解。它不改变 DPO 的偏好学习基本目标。[DPOTrainer 文档](https://huggingface.co/docs/trl/en/dpo_trainer)
+
+原 ChatML 样例说明消息结构，实际 loss 需核查模板、labels 与工具调用边界；格式合规与业务正确分开评测。
 
 ### 3.3 模型选型：为什么是 Qwen3-32B + LoRA
 
@@ -297,6 +313,10 @@ LoRA 的可解释性和稳定性更好：梯度直接更新低秩矩阵，不引
 **为什么不使用 QLoRA（4bit 量化 LoRA）**：
 
 本项目使用 8×A100 80G（总显存 640GB），完全可以承载 32B 模型的 BF16 精度加载，无需通过量化压缩显存。QLoRA 的 NF4 量化会引入权重量化误差，是否影响工具调用格式和数值参数准确性需要同条件评测；算力充足可采用 BF16 LoRA，不能断言其在所有任务上优于 QLoRA。
+
+#### LoRA 的缩放、参数化与初始化
+
+rsLoRA 调整 rank 缩放，DoRA 区分幅度和方向，PiSSA/EVA 改变初始化。它们在不同任务、预算和模型下的收益不同，不能直接宣称新方法取代原 LoRA/QLoRA。[PEFT 官方文档](https://huggingface.co/docs/peft/v0.21.0/package_reference/lora)
 
 ### 3.4 训练配置详解
 
@@ -394,7 +414,7 @@ training_args = TrainingArguments(
 }
 ```
 
-**ZeRO-3 vs ZeRO-2 的选择**：ZeRO-2 只分片优化器状态和梯度，ZeRO-3 还分片模型参数本身。对于 32B 模型，ZeRO-2 每卡仍需 ~40GB 显存存放参数，而 ZeRO-3 将参数也分片，每卡约 10GB 用于参数，大幅降低峰值显存需求。
+**ZeRO-3 vs ZeRO-2 的选择**：ZeRO-2 只分片优化器状态和梯度，ZeRO-3 还分片模型参数本身。对于 32B 模型，BF16 的 32B 基座权重总计约 64GB，ZeRO-2 不分片参数；理想 8 卡 ZeRO-3 分片约 8GB/卡，实际还包含聚合峰值和其他状态，大幅降低峰值显存需求。
 
 ### 3.6 训练监控与早停
 
@@ -426,13 +446,13 @@ SFT 完成后，在评测集上运行对比：
 | 任务完成率       | 52.1% | 83.6% | +31.5pp |
 | 高危场景阻断率     | 38.7% | 72.4% | +33.7pp |
 
-注意：**高危场景阻断率 SFT 后仍只有 72.4%**，远未达到 100% 的生产要求。这正是 DPO 阶段的核心任务。
+注意：**高危场景阻断率 SFT 后仍只有 72.4%**，远未达到 100% 的生产要求。这是原项目 DPO 阶段关注的目标之一；后训练仍需结合应用侧校验与实际执行权限。
 
 ---
 
 ## 四、DPO 阶段：偏好对齐
 
-### 4.1 为什么 SFT 不够，必须做 DPO
+### 4.1 为什么本项目在 SFT 后采用 DPO
 
 SFT 的本质是**最大似然估计**：给模型看"正确答案"，让它学会生成相似的输出。但这有一个根本性的局限：
 

@@ -29,14 +29,25 @@ Embedding 模型承担 **离线入库 + 在线查询编码** 两个职责，对�
 
 | 架构 | 延迟 | 适用场景 |
 |------|------|----------|
-| Bi-Encoder | 查询和文档独立编码，O(1) 检索 | 大规模召回（百万级） |
-| Cross-Encoder | 查询+文档联合编码，O(N) 检索 | 精排（百级） |
+| Bi-Encoder | 查询与文档独立编码，文档表示可预计算 | 大规模召回（百万级） |
+| Cross-Encoder | 每个候选与查询联合编码，成本随候选数增长 | 精排（百级） |
 
-Bi-Encoder 的核心优势是**向量可以预先离线计算并缓存**，查询时只需对 Query 编码一次，然后做向量相似度检索（ANN），这是大规模 RAG 系统唯一可行的架构。代价是表达能力弱于 Cross-Encoder（缺少 token 级别的交互注意力）。
+Bi-Encoder 的核心优势是**向量可以预先离线计算并缓存**，查询时只需对 Query 编码一次，然后做向量相似度检索（ANN），这是常用的大规模语义召回路线；词法、稀疏与多向量路线也可用于召回。单向量压缩会损失细粒度信息，效果差异需按任务比较。
 
-本系统选用 `gte-multilingual-base` 作为统一的 Bi-Encoder，它原生支持 **384 维**和 **768 维**两种输出维度：
+本系统选用 `gte-multilingual-base` 作为统一的 Bi-Encoder，模型默认 768 维，并支持弹性稠密表示；本项目采用 **384 维**和 **768 维**两档，不表示只有这两种可用维度。[GTE 模型卡](https://huggingface.co/Alibaba-NLP/gte-multilingual-base)
+
 - **384 维**：负责第一层粗筛，优先保证吞吐量
 - **768 维**：结合用户 SAP 画像做第二层精筛，优先保证语义覆盖
+
+#### 单稠密、稀疏与多向量表示
+
+| 表示方式 | 文档表示 | 匹配特点 | 主要代价 |
+| --- | --- | --- | --- |
+| 单稠密向量 | 文档压缩成一个向量 | 适合较低成本的语义召回 | 细粒度内容可能被压缩。 |
+| 稀疏向量 | 只有部分词项或特征维度非零 | 有利于词项与术语匹配 | 依赖对应的稀疏索引与表示规则。 |
+| 多向量 late interaction | 保存 token 或图像 patch 等多个表示 | 在打分阶段保留细粒度交互 | 存储和打分开销较大。 |
+
+多向量不是把单向量的维度调大，也不能直接当作原单向量索引的等价输入。Sentence Transformers 6.x 提供 `MultiVectorEncoder`，覆盖 ColBERT/ColPali 等路线；稀疏表示则有 `SparseEncoder`。[官方迁移指南](https://www.sbert.net/docs/migration_guide.html)
 
 ### 2.2 基座选型
 
@@ -51,11 +62,19 @@ Bi-Encoder 的核心优势是**向量可以预先离线计算并缓存**，查�
 | 模型 | 参数量 | 最大序列长度 | 多语言 | 说明 |
 |------|--------|-------------|--------|------|
 | BGE-M3 | 568M | 8192 | 是 | FlagEmbedding 系列，支持稠密+稀疏+多向量，但参数量偏大 |
-| E5-mistral-7B | 7B | 32K | 部分 | 太重，不适合高并发在线服务 |
+| E5-mistral-7B | 7B | 模型卡示例 4096 | 部分，官方建议英文 | 需使用 query 指令，长输入与在线成本单独评估 |
 | multilingual-e5-large | 560M | 512 | 是 | 基于 XLM-R，多语言能力强，但不支持多维度输出 |
 | **gte-multilingual-base** | **305M** | **8192** | **是** | **阿里 GTE 系列，推理快，原生支持 384/768 维输出** ✓ |
 
+E5 的模型卡示例、任务指令与语言边界见 [官方模型卡](https://huggingface.co/intfloat/e5-mistral-7b-instruct)。表中的性能描述是项目约束下的候选比较，不能单凭模型规模推导固定延迟。
+
 **选型结论**：选用 `gte-multilingual-base`（305M），它原生支持 384 维和 768 维两种输出维度，可用同一个模型同时满足粗筛和精筛两个通道，节省部署成本。
+
+#### Qwen3 检索模型候选
+
+Qwen3 提供 0.6B、4B、8B 的 Embedding/Reranker 系列。Embedding 支持较长输入和可变维度表示，使用方式还涉及任务指令；Reranker 不能默认套用所有传统 CrossEncoder 的输入和打分流程。
+
+候选比较应同时记录领域效果、显存、输入长度、延迟、指令模板和向量维度。更大的模型不保证在现有领域与负载下全面更优，原 GTE/BGE 等模型仍可作为历史选型与较低成本候选。[Embedding 模型卡](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B)、[Reranker 模型卡](https://huggingface.co/Qwen/Qwen3-Reranker-4B)
 
 ### 2.3 数据集构建
 
@@ -643,6 +662,8 @@ ANNOTATION_PROMPT = """
 
 #### 3.4.2 训练环境与框架配置
 
+当前 Sentence Transformers 有 `CrossEncoderTrainer`，不同模型可能依赖不同 tokenizer/processor 与打分流程。下面保留原训练栈和代码，按当时版本理解，不能将所有新 Reranker 套用为固定 `[CLS] query [SEP] doc` 分类头。[迁移指南](https://www.sbert.net/docs/migration_guide.html)
+
 **硬件配置：**
 
 | 资源  | 规格                             | 说明                              |
@@ -855,6 +876,12 @@ Reranker 的训练数据 = Embedding 召回的结果
 ## 五、工程部署注意事项
 
 ### 5.1 Embedding 服务
+
+不同模型的向量空间不能默认混用；同一模型的 query/document 指令、pooling、维度和归一化也影响匹配。改变这些条件后，即使数据库能接收向量，旧索引的相关性也未必成立。
+
+软件生态上，当前 Sentence Transformers 提供 `encode_query`/`encode_document` 和 `CrossEncoderTrainer` 等入口，6.x 还调整了部分打分、量化和处理器行为。新旧分数及量化产物不要默认视为完全等价；历史训练代码保留对应版本。[官方迁移说明](https://www.sbert.net/docs/migration_guide.html)、[发布记录](https://github.com/huggingface/sentence-transformers/releases)
+
+索引与过滤参见 [[RAG系统/01_技术栈/Milvus]]、[[Agent系统/01_技术栈/Memory机制与向量库接入]]。
 
 - **批量推理**：离线入库时采用 batch_size=256 的批量编码，GPU 利用率接近 100%
 - **动态批处理**：在线推理用异步批处理（等待 10ms 凑满一个 batch），将 QPS 提升 3~5 倍

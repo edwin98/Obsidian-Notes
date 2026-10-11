@@ -8,11 +8,19 @@ status: in_progress
 # LangGraph: 基于图与状态机的复杂 Agent 编排框架
 
 ## 1. 简介
+
+当前官方将预构建 `langgraph.prebuilt.create_react_agent` 路线迁移到 LangChain 的 `create_agent`。LangGraph 的 StateGraph、checkpoint、interrupt 等核心图编排思想仍有效；上层工厂变化不代表手写状态图被淘汰。[官方迁移指南](https://docs.langchain.com/oss/python/migrate/langgraph-v1)
+
+可以把两层职责分开理解：上层 Agent 工厂提供常见工具循环与中间件扩展，StateGraph 用于明确节点、状态和控制流。二者是组合关系，不宜简单描述为互相替代的两个框架。
+
+当前 LangChain Agent 的特定状态约束，不应直接套到所有 StateGraph。记忆方面，持久化 thread state 与跨线程 Store 也各有职责，详见 [[Agent系统/01_技术栈/Memory机制与向量库接入]]。[LangChain 迁移说明](https://docs.langchain.com/oss/python/migrate/langchain-v1)
+
+下面手写图和代码保留原项目版本；框架比较要注明具体版本与封装层。
 **LangGraph** 是 LangChain 生态系统中的一个独立扩展库（目前已成为 LangChain 推荐的核心底层框架），专为解决**创建周期性（循环，Cyclic）、高可控的单 Agent 及多 Agent 复杂工作流**而设计。
 
 传统的 LangChain 链（Chains 或 LCEL）采用的是有向无环图（DAG）结构，数据像流水线一样从一端输入，单向流到另一端输出。然而，真正的 AI Agent（如 ReAct 架构）需要“思考-行动-观察-再思考”的迭代过程。它必须是**循环的**，且需要极其可靠的机制来维护运行时的**中间状态（State）**。
 
-LangGraph 将整个 Agent 运行过程抽象为**图（Graph）和状态机（State Machine）**。它赋予了开发者微操 Agent 每一步走向的能力，是构建生产级、企业级可控 Agent 系统的不二之选。它不再是简单的 API 拼接，而是严谨的**系统工程设计**。
+LangGraph 将整个 Agent 运行过程抽象为**图（Graph）和状态机（State Machine）**。它允许开发者明确控制步骤和状态，适合需要可恢复与可干预的 Agent 流程。它不再是简单的 API 拼接，而是严谨的**系统工程设计**。
 
 ### LangGraph 解决的核心痛点
 在 LangGraph 出现之前，使用传统的 `AgentExecutor` 存在以下巨大瓶颈：
@@ -22,7 +30,7 @@ LangGraph 将整个 Agent 运行过程抽象为**图（Graph）和状态机（St
 
 ## 2. 核心架构与底层概念
 
-在 LangGraph 中，一切工作流都被定义为 `StateGraph` 的实例。你需要掌握以下四大核心概念：
+StateGraph 是定义带状态工作流的一种核心入口。你需要掌握以下四大核心概念：
 
 - **状态 (State / StateSchema)**: 
   - 图中流转的**“共享内存（Shared Memory）”**或“黑板”。通常使用 `typing.TypedDict` 或 `Pydantic` 定义。
@@ -34,7 +42,7 @@ LangGraph 将整个 Agent 运行过程抽象为**图（Graph）和状态机（St
   - 规定了节点之间的确定性先后流转方向。例如 `graph.add_edge("node_a", "node_b")`，意味着节点 A 执行完毕后，控制权无条件地交给节点 B。
 - **条件边 (Conditional Edges)**:
   - LangGraph 的**灵魂所在**，它是实现**分支判断（if/else）**与**循环控制（while）**的核心机制。
-  - 它也是一个 Python 函数，接收 `State` 评估轻量级判定逻辑，返回下一个目的节点的名称。大模型在这里扮演了“路由器决策中心”的角色。
+  - 它也是一个 Python 函数，接收 `State` 评估轻量级判定逻辑，返回下一个目的节点的名称。路由既可根据模型结果，也可使用确定性的业务条件，取决于图设计。
 
 ## 3. LangGraph 的核心优势与特性
 
@@ -142,15 +150,18 @@ inputs = {"messages": [("user", "北京今天天气咋样？适合不适合打�
 for step_output in app.stream(inputs):
     print(step_output)
 ```
-*(注：对于此类极度标准的、仅仅拥有普通工具的智能体，官方提供了一个拿来即用的封装层 `from langgraph.prebuilt import create_react_agent`。但在生产实战开发中，为了满足私有化的精细控制逻辑，开发者全都会亲自用此原生层 API 去组建网图！)*
+标准工具循环的预构建入口已从 `langgraph.prebuilt.create_react_agent` 迁移到 LangChain `create_agent`；需要细粒度业务编排时仍可使用手写 StateGraph。[迁移指南](https://docs.langchain.com/oss/python/migrate/langgraph-v1)
 
 ## 6. 生态配套与实战应用经验
 - **监控与分析利器 LangSmith**: 提供开箱即用的兼容性。可以在官方数据看板上查看到工作图中每一次步进(Step)的过程，非常清晰地监控每一次 Token 消耗及延迟时间。甚至允许开发人员在服务端后台对一次特定的中途报错的状态树直接发起"重新播放 (Replay)" 和 Debug。
-- **神级图形调试面板 LangGraph Studio**: 官方研发推出的一个本地桌面级可视化 IDE 工具，能够直接读取基于 `StateGraph` 的项目代码并渲染出动态三维工作线路图。不仅可以可视化观测消息流动走向，更支持热插拔并在页面端直接强制更改节点内的变量以观测后续不同的化学反应。这让多路调试不再只能单纯依靠控制台日志。
+- **可视化调试**：图可视化、状态检查和追踪有助于定位执行问题。原项目使用的 Studio 体验按当时版本理解，图形界面不能替代实际执行轨迹与状态校验。
 
 ## 7. 总结指导大纲
-- **纯粹的输入到一次性输出式任务 (Linear Tasks, 极少复杂的路由抉择)**：采用最原始的 **LangChain** 搭配 **LCEL** 已极为充足高效（例如普通 RAG 翻译抽取任务）。
-- **一旦业务涉及了持续循环反思、过程中断（人工审批安全风控）、多步骤报错隔离乃至需要安排不同角角落特化模型之间的会战大兵团级别协作时**：抛弃原生 `AgentExecutor` 的陈旧设定。**LangGraph** 毫不客气地讲就是截止2025时代的必备最强选项，当今学会了使用状态机流图设计 Agent ，就是走通了落地可控型企业级生成式 AI 应用这道必答题。
+
+- 固定的输入处理与生成流程可使用 Runnable/LCEL。
+- 常见工具循环可使用 LangChain Agent 工厂与中间件。
+- 自定义节点、路由、恢复和业务状态可直接使用 StateGraph。
+- 线程内 checkpoint 与跨线程 Store 分工不同；旧项目选择按当时条件解释。
 
 ## 8. 面试高频 FAQ (八股)
 

@@ -21,6 +21,14 @@
 - **文档重采样评估**：从知识库随机抽取 Chunk，由 Celery 调用模型生成对应 Question，以此来评价召回率。
 - **报警与监控**：当 RAG 系统检测到由于某种原因召回结果为空达到一定频次，由异步任务发送企业微信报警。
 
+### ETA/countdown 与队列配置
+
+5.6 增加 `worker_eta_task_limit`，限制 worker 预取并放在内存中的 ETA/countdown 任务数量；默认不自动设限。大量远期任务可能占用 worker 内存，因此“任务尚未执行”不等于“任务一定只在 broker 中等待”。它还扩展了自动创建 quorum queue 的配置并修复若干内存、关闭行为问题。[官方 5.6 更新](https://docs.celeryq.dev/en/stable/history/whatsnew-5.6.html)
+
+这些机制改善资源与队列管理，不会自动带来 exactly-once。任务重投与业务进度恢复不同，重试和幂等依然是原有知识的关键部分。
+
+原项目队列和任务实现仍按当时版本解释。
+
 ## 4. 技术实现示例
 ```python
 from celery import Celery

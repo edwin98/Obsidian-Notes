@@ -18,6 +18,8 @@ status: draft
 
 它的目的**不是让大模型在云端帮我们运行这段代码**，而是让大模型稳定、精确地返回我们需要执行哪个工具以及运行这个工具的参数。
 
+模型生成调用请求，应用执行工具，模型再利用返回结果。严格参数 Schema 控制结构，业务校验控制参数关系与权限；模型返回“调用”不等于动作已经实际完成。[结构化输出文档](https://developers.openai.com/api/docs/guides/structured-outputs?api-mode=responses)
+
 ## 2. 运作流程（四步走）
 
 一个完整的 Function Calling/Tool Use 流程通常由以下步骤组成：
@@ -33,6 +35,14 @@ status: draft
 4. **将工具结果喂给模型总结 (Agent ➔ LLM)**: 
    - 将上面得到的真实数据打包成 `ToolMessage` 形式，附随在历史对话（Messages）之后，再次请求大模型。
    - 大模型终于理解了实时数据，最终产出自然语言结果呈递给最终用户（“苹果公司当前的股价为150.2美元。”）。
+
+### Responses API 的工具循环
+
+OpenAI 推荐新项目使用 Responses，Chat Completions 仍受支持。Responses 用不同 Items 表达消息、reasoning、function call 和工具结果，结果通过 `call_id` 与调用对应；多轮状态可使用 `previous_response_id`、手工维护 Items 或 Conversations。不能把所有输出都当成普通文本消息。[官方迁移指南](https://developers.openai.com/api/docs/guides/migrate-to-responses)
+
+某些推理模型的工具循环还需保留接口返回的 reasoning Items。推理强度与回答长度不是同一个概念，也不要求应用伪造推理内容。[推理接口说明](https://developers.openai.com/api/docs/guides/reasoning)
+
+上面的 ToolMessage/messages 流程描述原项目使用的消息式接口；Responses 的 Items、call_id 和状态入口按对应协议处理。
 
 ## 3. 工具箱 (Tools) 常见分类
 
@@ -56,6 +66,14 @@ status: draft
 ### 本地文件系统类
 - **文件读写 (Read/Write File)**: 修改或生成配置项、撰写报告输出。
 
+### Function Calling、MCP 与 Skill 的关系
+
+Function Calling 描述模型如何表达调用意图；MCP 是能力发现与交互协议；Skill 则可以提供任务步骤与使用指导。传输、实验性 Tasks 与开放 Skills 格式详见 [[杂七杂八技术]]。[MCP 规范](https://modelcontextprotocol.io/specification/2025-11-25/changelog)
+
+DeepSeek 的 V4 Pro/Flash 路线也支持 Responses 格式及推理强度配置，V4.1 Flash 还更新了原生视觉与别名。不同提供方和本地兼容服务实现的能力不必完全相同；协议格式相近不代表内置工具、严格 Schema 和状态功能全部等价。[V4 API 说明](https://api-docs.deepseek.com/news/news260813/)、[更新记录](https://api-docs.deepseek.com/updates/)
+
+原项目工具循环与代码示例保留为对应时期的实现。
+
 ## 4. 最佳工程实践与防坑指南
 
 1. **“少即是多（Less is more）”**:
@@ -64,7 +82,7 @@ status: draft
 2. **Schema 描述至关重要 (Descriptions are Prompts)**: 
    - LLM 不看你函数里的核心代码，它**仅仅**根据你对函数的长段描述 (`docstring`) 以及各个参数字段（`symbol: “股票代码或简称可以参考纳斯达克标准”`）的详情来进行挑选。为你的函数及其所有参数编写极为详尽、准确的文档描述是确保 Agent 系统稳定的重中之重。
 3. **参数校验与错误拦截 (Error as Observation)**: 
-   - 比如模型要求传入数字，但它给了一个字符串。此时你的代码 `try/except` 捕获了 Type Error 或者是请求 API 时抛出了 404 错误。一定不要直接抛出系统崩溃并退出。
+   - 比如模型要求传入数字，但它给了一个字符串。此时你的代码 `try/except` 捕获了 Type Error 或者是请求 API 时抛出了 404 错误。应按错误类型返回可处理的工具结果，并设置重试次数与终止条件。
    - **优化**: 应该捕获这个异常，将这段报错的文本重新发回给 LLM。LLM 是极其聪明的，一旦它“看到（Observe）”了这个报错文字，它会有极大的概率明白传入的类型错了并进行反思和自校正。
 
 熟练使用和封装本地系统为 LLM 的工具 API 面板，是决定一名程序员在此浪潮中能不能把自身系统“AI Native 化”的核心区分度所在。

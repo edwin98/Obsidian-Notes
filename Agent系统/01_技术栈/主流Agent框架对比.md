@@ -5,79 +5,60 @@ tags:
   - 核心生态
 status: draft
 ---
+
 # 主流 Agent 框架横向对比
 
-在 AI 智能体开发领域，不仅仅有 LangChain 和 LangGraph 这样的全能底层工具，还诞生了多个偏重于特定场景（检索、多角色协作、工程化模拟）的框架或库。了解它们的优势与适用场景，是技术选型的关键技能。
+框架选型需要分别看控制流、状态恢复、数据接入、工具执行、可观测性和维护状态。以下按截至 2026-10-11 的官方能力整理；历史项目采用的版本和方案仍保留当时背景。
 
-## 1. LlamaIndex
-**一句话总结**: **RAG（检索增强生成）与数据连接的绝对王者，现在进一步演进为 Data Agent 框架。**
+## 1. LangChain 与 LangGraph
 
-### 核心定位
-LlamaIndex 最早是为针对私域数据的文档问答而诞生的项目。虽然它也能构建普通的 Agent，但其护城河在于其强大且精细的数据管理、索引和查询引擎。
+LangChain 1.x 的 `create_agent` 提供常见工具循环和 Middleware，底层依赖 LangGraph。LangGraph 的 StateGraph 适合明确编排节点、状态和控制流，支持 checkpoint 与 interrupt。二者可以组合，不能只按“简单链”和“复杂 Agent”机械划分。
 
-### 为什么不选 LangChain 的检索而去选 LlamaIndex？
-- 它的分块打包技术（Hierarchical Node）、混合检索（Hybrid Search + Reranker）、知识图谱检索（Property Graph）支持比 LangChain 的检索子系统更为精算和深耕。
-- 适合搭建**以数据资产为主导**的 Agent 系统，比如：研报分析 Agent、长文档解读 Agent，让 Agent 除了能上网搜索，还能极为高效地从公司自己的百亿级别数据库中精炼提取数据。
-- 提出了基于查询规划引擎的代理调用（Query Engine Router），可以智能决定是要去查向量库还是查 SQL 表。
+详见 [[Agent系统/01_技术栈/LangChain]]、[[Agent系统/01_技术栈/LangGraph]]。[LangChain 迁移指南](https://docs.langchain.com/oss/python/migrate/langchain-v1)、[LangGraph 迁移指南](https://docs.langchain.com/oss/python/migrate/langgraph-v1)
 
----
+## 2. LlamaIndex：数据接入、检索与 Workflows
 
-## 2. MetaGPT
-**一句话总结**: **多智能体架构（MAS），通过构建标准的软件公司 SOP（标准作业程序）来管理 Agent 协同工作。**
+LlamaIndex 的优势包括数据接入、索引和检索组织，例如层级检索、混合检索与图检索。它也有事件驱动 Workflows 和数据 Agent 路线，能力不限于 Retriever 封装。
 
-### 核心定位
-由国人团队开源的顶尖项目。它把复杂的工作流比作一家包含不同岗位的虚拟软件公司（Boss, Product Manager, Architect, Project Manager, Engineer, QA）。
+Workflows 用事件组织执行步骤，适用于围绕数据处理和检索构建流程。复杂业务仍需根据状态管理、执行控制和运维需求评估。[官方 Workflows 文档](https://developers.llamaindex.ai/python/llamaagents/workflows/)
 
-### 技术特色与场景
-- 主打群体智慧，解决单一模型无法处理大型复杂开发任务的痛点。
-- 将环境、记忆和共享内容进行了标准化（即文档驱动）。PM产出PRD文档，给架构师，架构师看完产出系统设计文档，再交给程序员写代码。
-- 强调**标准化输出（Standard Operating Procedures - SOPs）**：每个角色只对标准格式的数据进行输入和输出。
-- **重代码编写场景**：常用来做一键生成小游戏、全栈项目骨架等强工程化场景。
+## 3. MetaGPT：SOP 与 Data Interpreter
 
----
+MetaGPT 以角色分工和 SOP 组织协作，软件开发流程是经典应用。Data Interpreter 与 RAG 集成还覆盖数据分析和工具执行任务；这些是较早已有的能力，不能统称为 2026 年新增。
 
-## 3. AutoGen (由微软推出)
-**一句话总结**: **以多智能体对话 (Multi-Agent Conversations) 为核心驱动模式的开发框架。**
+SOP 有助于结构化协作，但不保证任意任务都能稳定执行，仍需处理工具、环境与结果校验。[官方发布记录](https://github.com/FoundationAgents/MetaGPT/releases)
 
-### 核心定位
-将多智能体系统抽象为一种**可定制化的对话模式**。多个 Agent 通过互相“聊天”（发消息和接消息）共同推进任务解决。
+## 4. AutoGen 与 Microsoft Agent Framework
 
-### 技术特色与场景
-- **极简对话代理**: 定义代理后，通过一句 `agent1.initiate_chat(agent2, message="...")` 启动全自动的讨论、报错纠正。
-- **本地代码执行的安全性支持**: 内部集成和非常注重沙箱机制如 Docker 运行，代理通过对话商议编写出 Python 代码并执行，再将执行的 Error 通过对话框说给彼此听，继续完善。
-- 提供了如 `GroupChat` 工具，多个 Agent 就像在一个微信群里一样，有一个“群主（Manager）”决定现在由“提问者”、“专家”还是“审查员”发言。
-- 适用于：数学解决、数据科学分析探究、需要高频头脑风暴并试错的通用开放型任务。
+AutoGen 的早期 0.2 接口常使用 `initiate_chat` 和 GroupChat。后续 AgentChat 路线采用异步执行，并支持状态保存/加载，因此“不支持持久状态”不是跨版本结论。[AgentChat 迁移指南](https://microsoft.github.io/autogen/stable/user-guide/agentchat-user-guide/migration-guide.html)
 
----
+截至本次核查，AutoGen 官方已进入维护模式，推荐新项目使用 Microsoft Agent Framework，并说明其已发布 1.0。维护状态与迁移成本是选型因素，旧项目无需仅因路线变化而重做。[AutoGen 官方说明](https://github.com/microsoft/autogen)
 
-## 4. CrewAI
-**一句话总结**: **轻量级、对小白极其友好的任务角色驱动编排框架。**
+## 5. CrewAI：Crews 与 Flows
 
-### 核心定位
-相较于 MetaGPT 浓厚的软件工程风和 AutoGen 复杂的底层对话图架构，CrewAI 受到了高度关注的原因是：**它的 API 极其漂亮、通俗直观。** 
+Crews 用角色、任务和协作关系组织 Agent；Flows 用事件、状态和路由组织流程，并提供持久化能力。两者可以组合，不能仅把 CrewAI 当作角色聊天或演示工具。
 
-### 技术特色与场景
-- 使用简单的语法定义一个又一个的任务（Tasks）和代理（Agents）。
-- 可以快速为 `Crew` （团队）分配流程方式（顺序执行 Sequential 还是分层执行 Hierarchical）。
-- 对接了 LangChain 的 Tool 生态引擎。如果需要快速跑一个不需要太多精细底层把控的多 Agent 演示原型（比如调研市场、出竞品分析报告的小团队），它能在10分钟内构建完成并运行，代码极其优雅。
+选型时关注流程可控性、恢复、工具执行和实际观测能力，而不是只比较初始演示所需代码量。[官方 Flows 文档](https://docs.crewai.com/en/concepts/flows)
 
----
+## 6. Dify：可视化应用与工作流
 
-## 5. Dify / FastGPT (BaaS平台型/低代码方案)
-**一句话总结**: **可视化的 LLM 核心应用搭建与部署流水线系统。**
+Dify 提供模型接入、知识库和可视化工作流。当前发布记录还包括 MCP 协议协商、结构化工具输出和将 Workflow 暴露为 MCP，因而不局限于知识问答页面。
 
-### 核心定位
-它们不仅仅是代码框架（SDK），更像是平台服务产品。提供了后端的一键部署流程，自带了可视化的节点拖拽界面。
+平台可降低集成工作，但权限、部署、版本与复杂控制流需求仍需评估。[官方发布记录](https://github.com/langgenius/dify/releases)
 
-### 技术特色与场景
-- 对于非硬核研发公司或追求效率的产品经理，在网页前端连线、节点拖拉拽的方式（类似 Langflow 等可视工具），能够飞速构建基础工作流（Workflow）、基于知识库提取的 Agent 流。
-- 虽然底层控制力低于手写 LangGraph，但自带 API Gateway、监控系统、凭证管理平台、前端对话界面的集成，极大地消灭了写“胶水代码”的过程。适用于企业内部或初创型 Saas 的快速迭代搭建。
+## 7. FastGPT：知识问答、工具与执行环境
 
----
+FastGPT 从知识问答扩展到工作流、MCP 和工具调用，4.16 路线包含 Agent Sandbox、工具 Schema 及应用用户共享实例等变化。执行环境、数据模型和运行状态随版本演进，应按实际版本理解。[官方发布记录](https://github.com/labring/FastGPT/releases)
 
-## 总结框架选型漏斗图（经验之谈）：
-1. 我想在两小时内搭建可供前端调用的聊天服务、管理知识库？👉 **Dify 平台**。
-2. 我需要处理极其复杂私域知识切分检索查询？ 👉 **LlamaIndex** + 基础 Agent 调度。
-3. 这是一个特定领域的黑盒专家（例如需要执行代码写爬虫）？👉 利用 OpenAI Function Calling 直接用 Python 手写或 **LangChain 基础 Agent**。
-4. 我需要设计一个审批流程繁长，具有多分支、重试和状态机模式的企业级核心审批 Agent？ 👉 **LangGraph**。
-5. 这个任务难以通过明确流转，我希望能像真人开会那样让系统自动推进得出结论？ 👉 微软 **AutoGen** 或 **CrewAI**。
+## 8. 按需求比较
+
+| 主要需求 | 优先考察的路线 | 需要进一步确认 |
+| --- | --- | --- |
+| 常见工具循环与中间件 | LangChain Agent | 模型适配、状态与工具恢复 |
+| 明确的业务状态机 | LangGraph StateGraph | 节点边界、checkpoint、人工介入 |
+| 数据接入与复杂检索 | LlamaIndex | 检索质量、数据处理与执行成本 |
+| 角色协作或 SOP | CrewAI、MetaGPT | 流程控制与工具结果校验 |
+| 微软 Agent 生态 | Microsoft Agent Framework；存量 AutoGen | 维护状态、版本兼容与迁移成本 |
+| 可视化应用交付 | Dify、FastGPT | 部署、权限、可扩展性与执行环境 |
+
+同一需求可以有多种实现。应根据任务与团队条件做比较，不能把某框架的定位当成能力上限。
