@@ -42,7 +42,7 @@ Prompt Engineering（提示词工程）是通过精心设计和优化输入文�
 随着任务复杂度的提升，基础的 Instruction 不够用时，需要引入以下高阶范式：
 
 ### 3.1 零样本与少样本提示 (Zero-shot & Few-shot Prompting)
-- **Zero-shot**：仅提供任务描述，不给例子。（适用于简单任务和强大的底座模型，如 GPT-4, Claude 3.5 Sonnet）。
+- **Zero-shot**：仅提供任务描述，不给例子。（适用于简单任务和强大的基础模型，如 GPT-4, Claude 3.5 Sonnet）。
 - **Few-shot**：在 Prompt 中塞入 2~5 个 (Input, Output) 的成对示例。
   - *原理*：利用 In-context Learning（上下文学习），让模型隐式学习输出的分布特征和格式约束。极大地提高输出结构的一致性。
 
@@ -61,8 +61,8 @@ Prompt Engineering（提示词工程）是通过精心设计和优化输入文�
 推理强度/预算与最终回答长度分别控制不同部分。工具交互时，某些 API 还要求保留返回的 reasoning Items；业务端不应自行伪造模型内部推理内容。[推理接口文档](https://developers.openai.com/api/docs/guides/reasoning)
 
 ### 3.3 思维树 (Tree of Thoughts, ToT) & 检索增强提示 (RAG)
-- **ToT (Tree of Thoughts)**：不仅让模型一步步想，还让模型在每一步探索多条路径（如思考方案A、B、C的优缺点），评估后再选择一条路径继续往下走。常用于长文写作和极度复杂的运筹规划。
-- **RAG (检索增强生成)**：针对模型可能胡编乱造（幻觉）的问题，在 Prompt 中强行注入外部检索系统查找到的知识。
+- **ToT (Tree of Thoughts)**：不仅让模型一步步想，还让模型在每一步探索多条路径（如思考方案A、B、C的优缺点），评估后再选择一条路径继续往下走。常用于长文写作和复杂的运筹规划。
+- **RAG（检索增强生成）**：将外部检索获得的资料放入 Prompt，为模型提供回答依据，降低生成无依据内容的风险。
 - *要求*：必须在 Prompt 中声明“*请**仅仅**基于以下 <context> 标签内提供的信息来回答问题，如果其中找不到答案，请回答‘我不知道’。”
 
 ### 3.4 结构化输出能力 (Structured Output)

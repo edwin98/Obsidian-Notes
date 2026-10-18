@@ -70,10 +70,10 @@ model = ChatOpenAI(model="gpt-4o")
 # 3. 指定输出提取器 (将模型返回值强转为纯字符串)
 output_parser = StrOutputParser()
 
-# 4. 组成 Pipeline (这就是 LCEL，极大降低了链式调用的代码量)
+# 4. 使用 LCEL 组合处理步骤
 chain = prompt | model | output_parser
 
-# 5. 触发执行 invoke 
+# 5. 触发执行 invoke
 response = chain.invoke({"topic": "AI程序员"})
 print(response)
 ```
@@ -174,31 +174,36 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 # 1. 准备一个全局数据源（生产环境应替换为 Redis 或数据库）来存放多用户对话记录
 store = {}
+
+
 def get_session_history(session_id: str):
     if session_id not in store:
         store[session_id] = ChatMessageHistory()
     return store[session_id]
 
+
 # 2. 编写 Prompt，使用 MessagesPlaceholder 为历史对话"留坑"
-prompt = ChatPromptTemplate.from_messages([
-    ("system", "你是个聪明的私人管家。"),
-    MessagesPlaceholder(variable_name="history"), 
-    ("human", "{question}"),
-])
+prompt = ChatPromptTemplate.from_messages(
+    [
+        ("system", "你是个聪明的私人管家。"),
+        MessagesPlaceholder(variable_name="history"),
+        ("human", "{question}"),
+    ]
+)
 chain = prompt | ChatOpenAI(model="gpt-4o")
 
-# 3. 使用 RunnableWithMessageHistory 对其进行增强包裹，实现黑魔法的自动注入与追加
+# 3. 使用 RunnableWithMessageHistory 自动读取和追加历史消息
 chain_with_history = RunnableWithMessageHistory(
     chain,
-    get_session_history, # 告知框架去哪里拉取/存入历史
-    input_messages_key="question",     # 告诉框架用户的新消息存在哪个变量
-    history_messages_key="history",    # 告诉框架历史记录填取到哪个坑位
+    get_session_history,  # 告知框架去哪里拉取/存入历史
+    input_messages_key="question",  # 告诉框架用户的新消息存在哪个变量
+    history_messages_key="history",  # 告诉框架历史记录填取到哪个坑位
 )
 
 # 4. 调用时传入 config 参数指定当前的用户身份隔离 (session_id)
 chain_with_history.invoke(
     {"question": "记住哦，我叫张三"},
-    config={"configurable": {"session_id": "user_123"}}
+    config={"configurable": {"session_id": "user_123"}},
 )
 ```
 

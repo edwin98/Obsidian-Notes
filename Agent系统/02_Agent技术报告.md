@@ -9,7 +9,7 @@
 
 ## 一、项目背景与业务挑战
 
-### 业务痛点
+### 业务问题
 
 5G 基站大规模商用后，网络验收与回归测试面临三个核心矛盾：
 
@@ -58,7 +58,7 @@
 |:---|:---|:---|
 | **模型层** | Qwen3-32B（主干推理）/ 小模型（Guardrail 分类） | LLM 推理、安全检测 |
 | **编排层** | LangGraph（状态机）/ LangChain（工具抽象）| Agent 图控制流 |
-| **推理服务** | vLLM + PagedAttention | 高并发 KV Cache 优化 |
+| **推理服务** | vLLM + PagedAttention | 并发请求与 KV Cache 管理 |
 | **知识层** | Milvus（HNSW 向量）+ Elasticsearch（BM25）+ Cross-Encoder Reranker | 三级混合检索 |
 | **异步层** | Celery + Kafka | 长时任务解耦、HITL 告警 |
 | **接口层** | FastAPI + SSE | 实时状态流推送 |
@@ -120,7 +120,7 @@ class AgentState(TypedDict):
 
 ## 四、关键技术模块详解
 
-### 4.1 RAG 赋能的 LLM 用例生成
+### 4.1 基于 RAG 的 LLM 用例生成
 
 通信领域的 OOV（Out-of-Vocabulary）问题严重：`PRACH`、`BWP`、`N2 interface` 等专有名词纯靠 Embedding 模型容易产生语义漂移。系统采用三级混合检索：
 
@@ -144,7 +144,7 @@ class AgentState(TypedDict):
 **知识库构成**：
 - 3GPP 协议文档（BM25 精确匹配协议规范）
 - 历史 Bugzilla 缺陷库（向量检索补全边界场景）
-- 专家确认的 Golden Cases（带背书的高质量样本）
+- 专家确认的 Golden Cases（经专家确认的样本）
 
 **检索前置增强**：
 - Qwen3-4B 执行**指代消解**与**多路问题扩展**，提升召回覆盖率
@@ -156,7 +156,7 @@ class AgentState(TypedDict):
 
 Guardrail 节点是本系统与教科书 ReAct 最核心的工程差异。工具调用在执行前**必须经过安全检测**，而不是直接下发。
 
-**检测机制**（双缝检测）：
+**检测机制**（两层检测）：
 1. **规则层**：正则扫描工具参数，匹配高危关键词（`format_c`、`reset_all`、`force_reboot`、`wipe` 等）
 2. **分类层**（可选）：轻量级安全分类模型二次确认（防止关键词绕过）
 
@@ -202,9 +202,9 @@ API 唤醒 → 同一 thread_id：静态断点 update_state + invoke(None)，动
 
 **HITL 解决的三类业务问题**：
 
-1. **灾难性环境防护**：拦截包含高危写权限信令的用例，为脆弱的底层硬件设立最后防线
+1. **高危操作拦截**：检查可能影响设备或环境的写操作，执行前交由授权人员审核
 2. **模糊边界判定**：置信度处于灰度区间（0.60~0.65）时交由专家会诊
-3. **Novel Case 确权**：与知识库相似度极低的新奇用例，由专家鉴别价值后决策是否执行——确认后的 Golden Case 自动回流知识库
+3. **新用例审核（Novel Case）**：对于与知识库相似度较低的新用例，由专家确认有效性和测试价值，再决定是否执行；确认后的 Golden Case 写回知识库。
 
 **HITL 的战略价值**：它同时是数据飞轮的采集入口——被打回的异常用例成为 DPO 负样本，专家修正后的版本成为正样本，系统在安全拦截的同时持续收集微调数据。
 
@@ -264,7 +264,7 @@ LoRA 插入：q_proj, v_proj, o_proj, gate_proj, up_proj
 
 **问题**：SFT 只能教模型"什么是正确的"，无法教它"什么是危险的边界"。
 
-**数据采集**：HITL 组件是天然的 DPO 数据采集器：
+**数据采集**：HITL 组件可以收集 DPO 所需的偏好数据：
 ```
 高危用例被专家打回  →  Y_rejected（负样本）
 专家修改后通过      →  Y_chosen（正样本）
@@ -274,7 +274,7 @@ LoRA 插入：q_proj, v_proj, o_proj, gate_proj, up_proj
 
 **DPO 相比 RLHF 的优势**：省去独立 Reward Model 的训练复杂度，直接通过偏好对数据进行梯度对齐，工程实现更轻量。
 
-**收益**：对"高危不确定场景"自动触发自我怀疑（Confidence Score 跌出阈值），灾难性幻觉生成率显著降低，系统具备真正的企业级安全对齐能力。
+**预期收益**：在高危或低置信度场景转入人工审核，减少错误操作。实际拦截效果和安全性仍需通过测试与运行记录验证。
 
 ---
 
@@ -301,7 +301,7 @@ LoRA 插入：q_proj, v_proj, o_proj, gate_proj, up_proj
 
 **Step 5 — 结论输出与知识回流（Reflection）**
 - 输出报告："FAIL。根因：基站 A 与基站 B 的 Xn 回传链路存在拥塞丢包，建议排查承载网络，非空口问题。"
-- 专家确认为 Golden Case，自动 Embedding 入库，完成认知进化内闭环
+- 专家确认 Golden Case 后，将其编码并写入知识库，供后续任务检索复用
 
 ---
 
@@ -360,7 +360,7 @@ LoRA 插入：q_proj, v_proj, o_proj, gate_proj, up_proj
 
 ### Q1：为什么选 LangGraph 而不是基础的 LangChain AgentExecutor？
 
-传统 `AgentExecutor` 本质是一个死循环黑盒，对通信自动化测试这种"出错就可能连锁崩溃"的任务太不可控。
+传统 `AgentExecutor` 封装了工具调用循环。对于需要明确分支、审批和恢复的通信测试任务，项目选择使用 LangGraph 自定义状态图，以便控制和检查各步骤。
 
 LangGraph 将流程抽象为**状态机**，带来三个核心优势：
 1. **容错性**：可以明确定义异常重试路径，并在图中挂载 HITL 断点
@@ -394,7 +394,7 @@ LangGraph 将流程抽象为**状态机**，带来三个核心优势：
 
 **SFT**：解决格式和术语，数据方案来自 Self-Instruct + HITL；本地 train_sft.py 使用 BF16 LoRA，历史 QLoRA 表述与脚本不符，现按本地代码更正。
 
-**DPO**：HITL 是天然的偏好数据采集器，被打回的高危用例为负样本，专家修正后为正样本，直接绕过 Reward Model 进行偏好对齐，比 RLHF 工程实现轻量很多。
+**DPO**：HITL 可以收集偏好数据，被打回的高危用例为负样本，专家修正后为正样本，直接绕过 Reward Model 进行偏好对齐，比 RLHF 工程实现轻量很多。
 
 整套"执行 → 拦截打回 → 专家批改 → SFT/DPO 迭代"的闭环，使 Agent 的安全意识持续向顶级专家经验收敛。
 

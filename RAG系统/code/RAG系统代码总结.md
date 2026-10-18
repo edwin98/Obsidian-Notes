@@ -85,7 +85,7 @@ class LLMGenerator(ABC):
   -> ThreeLevelRetriever（三级检索）
       L1 粗筛：BM25 + Vector384 多路召回，各 top 1500，去重
       L2 精筛：RSF 动态权重融合 -> top 80
-      L3 精排：CrossEncoder Rerank + 断崖截断 -> top 10
+      L3 精排：CrossEncoder Rerank + 基于分数差的动态截断 -> top 10
   -> TokenBudgetManager（控制传入 LLM 的 context 在 token 预算内）
   -> LLMGenerator 流式生成（AsyncIterator[str]）
   -> 写精确缓存 + 语义缓存 + 会话历史（TTL 24小时）
@@ -113,7 +113,7 @@ token = 8 时            alpha = 0.55  均衡
 （两路分数均经 Min-Max 归一化到 [0, 1]）
 ```
 
-### 断崖截断
+### 基于分数差的动态截断
 
 相邻分差 > 0.8 且后一条绝对分 < 0.3 时截断，防止低质量结果混入。
 
