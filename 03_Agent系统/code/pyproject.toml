@@ -1,0 +1,28 @@
+[project]
+name = "five-g-agent-learning"
+version = "0.1.0"
+description = "5G Agent 系统的可执行教学实现"
+requires-python = ">=3.12"
+dependencies = [
+    "langgraph>=1.1.2,<2",
+    "langchain-openai>=1.1.11,<2",
+    "langsmith>=0.7.20,<1",
+    "python-dotenv>=1,<2",
+    "fastapi>=0.129,<1",
+    "uvicorn>=0.41,<1",
+    "numpy>=1.26,<3",
+    "scipy>=1.12,<2",
+]
+
+[project.optional-dependencies]
+postgres = ["langgraph-checkpoint-postgres>=3,<4", "psycopg[binary]>=3.3,<4"]
+
+[dependency-groups]
+dev = ["pytest>=9,<10", "httpx>=0.28,<1", "ruff>=0.14,<1"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+
