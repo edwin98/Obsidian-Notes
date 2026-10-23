@@ -92,12 +92,14 @@ class OfflineModel:
         )
 
 
-def create_demo_graph(scenario="pass"):
+def create_demo_graph(scenario="pass", *, step_mode=False):
     if scenario not in {"pass", "regression", "danger", "review"}:
         raise ValueError("未知离线场景")
     return create_graph_in_memory(
         llm_factory=lambda with_tools: OfflineModel(scenario, with_tools),
         tool_map=create_sandbox_tools(regression=scenario == "regression"),
+        # 静态断点在节点完成后暂停；下一步以 None 续接同一 Checkpoint。
+        interrupt_after="*" if step_mode else None,
     )
 
 
@@ -106,7 +108,15 @@ def main():
     parser.add_argument(
         "--scenario", choices=["pass", "regression", "danger", "review"], default="pass"
     )
+    parser.add_argument("--ui", action="store_true", help="启动本地可视化学习界面")
+    parser.add_argument("--port", type=int, default=8000, help="可视化服务端口")
     args = parser.parse_args()
+    if args.ui:
+        import uvicorn
+
+        print(f"学习界面：http://127.0.0.1:{args.port}/?scenario={args.scenario}")
+        uvicorn.run("api:app", host="127.0.0.1", port=args.port)
+        return
     graph = create_demo_graph(args.scenario)
     config = {"configurable": {"thread_id": uuid.uuid4().hex}, "recursion_limit": 40}
     graph_input = initial_state("验证 Xn 切换回归并与基线比较")

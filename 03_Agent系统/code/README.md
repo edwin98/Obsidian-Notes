@@ -18,6 +18,23 @@ uv run pytest tests -q
 
 这几条命令无需 API 密钥、GPU 或数据库。`danger` 和 `review` 会真正暂停，输入 `approve` 才继续，其余输入拒绝。离线模型是按规则请求工具的替身，用于理解工程流程。
 
+## 可视化学习界面
+
+```powershell
+uv sync --group dev
+uv run python demo.py --ui
+```
+
+浏览器打开 <http://127.0.0.1:8000>。端口被占用时可加 `--port 8001`，并打开对应地址。
+
+- 选择正常通过、回归故障、危险请求或低置信度复核，无需配置 API 密钥。
+- 默认单步执行：点击“开始实验”完成意图澄清，此后每点一次“执行下一步”才运行一个节点。也可在开始前选择连续执行。
+- 点击执行轨迹，查看动作与观察、状态变化、输入快照和完整状态；界面解释本步为何走向下一个节点，并标明对应源码。
+- 危险请求与低置信度报告会真正等待人工决定。在页面填写反馈并批准或拒绝；普通“下一步”不能绕过审批。
+- 页面刷新后会回放当前任务的轨迹并保留断点；服务重启后，内存任务和断点失效。
+
+建议先单步观察 `agent` 提出的 `tool_calls`，再经过 `guardrail`，最后对比 `tools` 返回的 `ToolMessage`。界面展示可观察的消息、证据和路由；离线替身不代表真实模型的规划能力。
+
 ## 流程
 
 ```text
@@ -42,6 +59,7 @@ START → clarify → agent → guardrail → tools → agent
 | `rag.py` | 本地模拟检索、融合、精排及上下文引用 |
 | `multi_agent.py` | Send 分发、独立 Worker 图、汇总与签发门槛 |
 | `api.py` | HTTP、逐节点 SSE、审批与澄清续接 |
+| `web/`、`teaching.py` | 本地学习界面、状态快照对比与路由说明 |
 | `statistical.py` | 原始重复样本的 Welch/配对 t/KS 检验 |
 | `learning.py` | 专家确认数据导出 SFT/DPO |
 | `offline_evaluation.py` | 真实状态图上的固定场景工程回归 |

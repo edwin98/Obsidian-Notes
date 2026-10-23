@@ -167,7 +167,7 @@ def create_graph_with_postgres():
     return _build_workflow().compile(checkpointer=checkpointer)
 
 
-def create_graph_in_memory(*, llm_factory=None, tool_map=None):
+def create_graph_in_memory(*, llm_factory=None, tool_map=None, interrupt_after=None):
     """
     Demo/测试模式：MemorySaver Checkpointer。
 
@@ -178,5 +178,5 @@ def create_graph_in_memory(*, llm_factory=None, tool_map=None):
     from langgraph.checkpoint.memory import MemorySaver
 
     return _build_workflow(llm_factory=llm_factory, tool_map=tool_map).compile(
-        checkpointer=MemorySaver()
+        checkpointer=MemorySaver(), interrupt_after=interrupt_after
     )

@@ -10,9 +10,13 @@ import logging
 import os
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from langchain_core.messages import HumanMessage
 from langgraph.types import Command
 from pydantic import BaseModel, ConfigDict, Field
@@ -20,6 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from config import RECURSION_LIMIT
 from graph import create_graph_in_memory
 from state import initial_state
+from teaching import NODE_GUIDE, explain_step, next_node
 
 
 class RunRequest(BaseModel):
@@ -39,9 +44,26 @@ class ClarificationRequest(BaseModel):
     answer: str = Field(min_length=1)
 
 
+class DemoRequest(RunRequest):
+    scenario: Literal["pass", "regression", "danger", "review"] = "pass"
+    step_mode: bool = True
+
+
 app = FastAPI(title="5G Agent 教学 API")
 _task_store: dict[str, dict] = {}
 logger = logging.getLogger(__name__)
+WEB_DIR = Path(__file__).resolve().parent / "web"
+app.mount("/assets", StaticFiles(directory=WEB_DIR), name="assets")
+
+
+@app.get("/", include_in_schema=False)
+async def learning_ui():
+    return FileResponse(WEB_DIR / "index.html")
+
+
+@app.get("/demo/config")
+async def demo_config():
+    return {"nodes": NODE_GUIDE}
 
 
 def _now():
@@ -56,7 +78,9 @@ def _store(task_id):
 
 async def _push_event(task_id, event):
     store = _task_store[task_id]
-    store["events"].append({"timestamp": _now(), **event})
+    store["events"].append(
+        {"sequence": len(store["events"]), "timestamp": _now(), **event}
+    )
     store["changed"].set()
 
 
@@ -69,14 +93,17 @@ async def _run_agent_async(task_id, graph_input):
     store = _store(task_id)
     graph, config = store["graph"], store["config"]
     loop = asyncio.get_running_loop()
+    pending_review = None
 
-    async def on_chunk(chunk):
+    async def on_chunk(chunk, before, after):
+        nonlocal pending_review
         for name, update in chunk.items():
             if name == "__interrupt__":
-                store["status"] = "hitl_pending"
-                await _push_event(
-                    task_id, {"event": "hitl_required", "review": update[0].value}
-                )
+                # interrupt_after 的静态暂停不携带人工审批 payload。
+                if not update:
+                    continue
+                # 等流结束、Checkpoint 提交后才开放审批，避免抢先恢复。
+                pending_review = update[0].value
                 continue
             await _push_event(
                 task_id,
@@ -84,19 +111,54 @@ async def _run_agent_async(task_id, graph_input):
                     "event": "node_update",
                     "node": name,
                     "confidence_score": update.get("confidence_score"),
+                    "input": jsonable_encoder(before),
+                    "update": jsonable_encoder(update),
+                    "state": jsonable_encoder(after),
+                    "next_node": next_node(name, after),
+                    "explanation": explain_step(name, after),
                 },
             )
 
     def run():
-        for chunk in graph.stream(graph_input, config=config, stream_mode="updates"):
-            asyncio.run_coroutine_threadsafe(on_chunk(chunk), loop).result()
+        before, pending = {}, {}
+        # updates 是节点增量，values 是 reducer 合并后的真实状态。
+        # 两者配对，避免从尚未提交的 Checkpoint 猜测本步的输出。
+        for mode, chunk in graph.stream(
+            graph_input, config=config, stream_mode=["updates", "values"]
+        ):
+            if mode == "updates":
+                if "__interrupt__" in chunk:
+                    asyncio.run_coroutine_threadsafe(
+                        on_chunk(chunk, before, before), loop
+                    ).result()
+                else:
+                    pending = chunk
+            else:
+                after = {
+                    key: value for key, value in chunk.items() if key != "__interrupt__"
+                }
+                if pending:
+                    asyncio.run_coroutine_threadsafe(
+                        on_chunk(pending, before, after), loop
+                    ).result()
+                    pending = {}
+                before = after
         return graph.get_state(config)
 
     try:
         snapshot = await asyncio.to_thread(run)
         if snapshot.next:
             # interrupt 不是完成；保留图实例、thread_id 和完整 Checkpoint。
-            store["status"] = "hitl_pending"
+            if any(task.interrupts for task in snapshot.tasks):
+                store["status"] = "hitl_pending"
+                await _push_event(
+                    task_id, {"event": "hitl_required", "review": pending_review}
+                )
+            else:
+                store["status"] = "step_paused"
+                await _push_event(
+                    task_id, {"event": "step_paused", "next_nodes": snapshot.next}
+                )
         elif snapshot.values.get("needs_clarification"):
             store["status"] = "awaiting_clarification"
             await _push_event(
@@ -139,6 +201,17 @@ def _create_task_graph():
 
 @app.post("/run")
 async def submit_task(req: RunRequest):
+    return _submit_task(req, _create_task_graph())
+
+
+@app.post("/demo/run")
+async def submit_demo(req: DemoRequest):
+    from demo import create_demo_graph
+
+    return _submit_task(req, create_demo_graph(req.scenario, step_mode=req.step_mode))
+
+
+def _submit_task(req, graph):
     if not req.query.strip():
         raise HTTPException(422, "query 不能为空白")
     task_id = uuid.uuid4().hex
@@ -148,7 +221,7 @@ async def submit_task(req: RunRequest):
     _task_store[task_id] = {
         "thread_id": thread_id,
         "site_id": req.site_id,
-        "graph": _create_task_graph(),
+        "graph": graph,
         "config": {
             "configurable": {"thread_id": thread_id},
             "recursion_limit": RECURSION_LIMIT,
@@ -160,6 +233,16 @@ async def submit_task(req: RunRequest):
     }
     _start(task_id, initial_state(req.query))
     return {"task_id": task_id, "thread_id": thread_id}
+
+
+@app.post("/step/{task_id}")
+async def step_task(task_id: str):
+    if _store(task_id)["status"] != "step_paused":
+        raise HTTPException(
+            409, "仅教学单步暂停的任务可以执行下一步；人工审批请使用审批接口"
+        )
+    _start(task_id, None)
+    return {"task_id": task_id, "message": "正在执行下一节点"}
 
 
 @app.post("/resume/{task_id}")

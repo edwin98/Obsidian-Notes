@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Agent 运行实验室</title>
+  <link rel="stylesheet" href="/assets/style.css">
+  <script src="/assets/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/">AGENT <span>运行实验室</span></a>
+    <div class="topmeta">5G 测试验证 <span class="pill">本地 · 离线沙盒</span></div>
+  </header>
+  <main class="workspace">
+    <aside class="setup panel">
+      <div class="eyebrow">EXPERIMENT SETUP</div>
+      <h1>从一次运行，<br>读懂 Agent。</h1>
+      <p class="muted intro">观察请求如何变成工具动作，再变成有证据的结论。</p>
+      <form id="run-form">
+        <fieldset>
+          <legend>01 <span>选择实验场景</span></legend>
+          <label class="scenario"><input type="radio" name="scenario" value="pass" checked><span><strong>正常通过</strong><small>工具取证 → 基线比较 → PASS</small></span><span class="scenario-tag">基础</span></label>
+          <label class="scenario"><input type="radio" name="scenario" value="regression"><span><strong>回归故障</strong><small>KPI 异常 → 日志分析 → FAIL</small></span><span class="scenario-tag">排错</span></label>
+          <label class="scenario"><input type="radio" name="scenario" value="danger"><span><strong>危险请求</strong><small>安全拦截 → 人工批准或拒绝</small></span><span class="scenario-tag">安全</span></label>
+          <label class="scenario"><input type="radio" name="scenario" value="review"><span><strong>低置信度复核</strong><small>保留报告 → 人工复核</small></span><span class="scenario-tag">复核</span></label>
+        </fieldset>
+        <label class="field-label" for="query">02 <span>测试请求</span></label>
+        <textarea id="query" rows="3" required>验证 Xn 切换回归并与基线比较</textarea>
+        <label class="field-label" for="mode">03 <span>执行方式</span></label>
+        <select id="mode"><option value="step">单步执行 · 每个节点后暂停</option><option value="auto">连续执行 · 随时回看轨迹</option></select>
+        <button class="primary start" id="start" type="submit">开始实验 <span aria-hidden="true">→</span></button>
+      </form>
+      <div class="setup-note"><strong>这次运行是真实的</strong><p>复用 demo 的状态图、路由、沙盒工具和断点。模型使用规则替身，无需密钥，不连接真实网元。</p></div>
+      <a class="api-link" href="/docs" target="_blank" rel="noreferrer">查看 API 文档 <span aria-hidden="true">↗</span></a>
+    </aside>
+
+    <section class="lab" aria-label="执行过程">
+      <div class="lab-heading"><div><div class="eyebrow">LIVE EXECUTION</div><h2>把执行过程展开来看</h2></div><span id="status" class="pill" role="status">等待开始</span></div>
+      <div class="notice" id="notice" role="status">先选择左侧场景。建议从“正常通过 + 单步执行”开始。</div>
+      <section class="panel flow-panel" aria-label="状态图">
+        <div class="section-caption"><span>共享状态驱动的执行图</span><span>工具执行后回到 agent，形成 ReAct 循环</span></div>
+        <div class="flow" id="flow">
+          <div class="flow-node" data-node="clarify"><code>01 / clarify</code><strong>意图澄清</strong></div><span class="flow-arrow" aria-hidden="true">→</span>
+          <div class="flow-node" data-node="agent"><code>02 / agent</code><strong>选择下一步</strong></div><span class="flow-arrow" aria-hidden="true">→</span>
+          <div class="flow-node" data-node="guardrail"><code>03 / guardrail</code><strong>安全检查</strong></div><span class="flow-arrow" aria-hidden="true">→</span>
+          <div class="flow-node" data-node="tools"><code>04 / tools</code><strong>执行工具</strong></div>
+        </div>
+        <div class="branch-row"><span>agent 无工具请求 → <b data-node="result_judge">result_judge 双轨判定</b></span><span>危险请求 / 低置信度 / 熔断 → <b data-node="hitl">hitl 人工审批</b></span></div>
+      </section>
+      <div class="metrics" aria-label="所选步骤的状态">
+        <div><span>已记录节点</span><strong id="step-count">00</strong></div>
+        <div><span>已执行工具 <small>所选步骤</small></span><strong id="tool-count">0</strong></div>
+        <div title="初始值 1.0 是默认状态；判定评分来自模型自报，并非校准后的正确概率。"><span>当前置信度 <small>状态值</small></span><strong id="confidence">—</strong></div>
+        <div><span>连续工具错误</span><strong id="errors">0</strong></div>
+      </div>
+      <section class="review panel" id="review" hidden aria-label="人工审批">
+        <div class="review-heading"><strong>流程已暂停，等待你的决定</strong><span class="pill warning">HITL</span></div>
+        <p id="review-reason"></p>
+        <details><summary>查看待审批动作或报告</summary><pre id="review-payload"></pre></details>
+        <label class="field-label" for="feedback">审批反馈（可选）</label>
+        <input id="feedback" placeholder="例如：已核对工具参数，允许继续">
+        <div class="review-actions"><button id="approve" class="primary">批准并继续</button><button id="reject" class="secondary">拒绝并结束</button><small>批准不会提高置信度，也不代表测试通过。</small></div>
+      </section>
+      <section class="review panel" id="clarification" hidden>
+        <strong>请补充测试目标</strong><p id="question"></p>
+        <form id="clarify-form"><label class="sr-only" for="answer">补充信息</label><input id="answer" required><button class="primary" type="submit">提交补充</button></form>
+      </section>
+      <section class="result panel" id="result" hidden aria-label="最终结果"><div><span class="eyebrow">FINAL RESULT</span><h3 id="verdict"></h3></div><div><p id="root-cause"></p><p id="issues" class="muted"></p></div></section>
+      <div class="execution-grid">
+        <section class="timeline-panel panel">
+          <div class="panel-heading"><h3>执行轨迹</h3><button class="text-button" id="latest" disabled>回到最新</button></div>
+          <div class="timeline" id="timeline"><p class="empty-timeline">每个完成的节点，<br>都会在这里留下记录。</p></div>
+          <div class="step-control"><button class="primary" id="next" disabled>执行下一步 <span aria-hidden="true">→</span></button><p id="next-hint">先开始一个实验</p></div>
+        </section>
+        <section class="detail-panel panel" aria-label="节点详情">
+          <div id="empty" class="empty-detail"><div class="empty-diagram" aria-hidden="true"><span>输入</span><i>→</i><span>节点</span><i>→</i><span>状态</span></div><h3>每一步，都有迹可循。</h3><p>开始后，点击左侧任意一条轨迹，查看节点读到了什么、<br>返回了什么，以及为什么走向下一个节点。</p><div class="learning-tip"><b>先记住这个区别</b><p><code>AIMessage.tool_calls</code> 是模型提出的请求；<br><code>ToolMessage</code> 才是工具实际执行后的观察。</p></div></div>
+          <div id="detail" hidden>
+            <div class="detail-heading"><div><span class="eyebrow" id="detail-index"></span><h3 id="detail-title"></h3></div><span id="detail-time" class="muted"></span></div>
+            <div class="explanation"><p id="explanation"></p><div id="route" class="route"></div></div>
+            <div class="tabs" role="tablist" aria-label="详情视图"><button role="tab" id="tab-action" aria-controls="view-action" aria-selected="true" data-tab="action">动作与观察</button><button role="tab" id="tab-diff" aria-controls="view-diff" aria-selected="false" data-tab="diff">状态变化</button><button role="tab" id="tab-input" aria-controls="view-input" aria-selected="false" data-tab="input">输入快照</button><button role="tab" id="tab-state" aria-controls="view-state" aria-selected="false" data-tab="state">完整状态</button></div>
+            <div class="tab-content" role="tabpanel" id="view-action" aria-labelledby="tab-action"><div id="actions"></div><details class="raw-details"><summary>查看节点原始增量 update</summary><pre id="raw-update"></pre></details></div>
+            <div class="tab-content" role="tabpanel" id="view-diff" aria-labelledby="tab-diff" hidden><p class="view-note">比较本步前后的实际值。messages 由 reducer 合并，其余字段通常替换。</p><div id="diff"></div></div>
+            <div class="tab-content" role="tabpanel" id="view-input" aria-labelledby="tab-input" hidden><p class="view-note">节点执行前的共享 State。模型的系统提示词在 nodes.py 中追加。</p><pre id="input-json"></pre></div>
+            <div class="tab-content" role="tabpanel" id="view-state" aria-labelledby="tab-state" hidden><p class="view-note">节点返回增量经过 reducer 合并后的真实 State。</p><pre id="state-json"></pre></div>
+            <footer class="source-ref" id="source"></footer>
+          </div>
+        </section>
+      </div>
+      <footer class="lab-footer"><span>观察的是实际消息、工具结果与路由，不是模型内部思维。</span><span id="task-label">所有运行保存在本地服务内存中</span></footer>
+    </section>
+  </main>
+</body>
+</html>
