@@ -1,6 +1,6 @@
 ---
 title: "Reranker 领域微调与标注"
-updated: 2026-10-23
+updated: 2026-10-25
 ---
 
 # Reranker 领域微调与标注
@@ -220,13 +220,13 @@ wandb                      # 训练全程监控（loss、NDCG、学习率曲线�
 
 **训练时间实测（完整链路）：**
 
-| 阶段 | 数据量 | 耗时 | 备注 |
-|------|--------|------|------|
-| 数据预处理（tokenization + 本地缓存） | 48 万条 query，每条 1 正 + 5 负 | ~1.5 h | 32 核 CPU 多进程并行 |
-| 离线 Reranker 打分（用于 Embedding 蒸馏阶段生成软标签） | 同上 | ~3 h | 仅推理，无梯度，单卡 A10G |
-| **Reranker 全量 SFT（3 epoch）** | ~280 万 query-doc pair | **~5 h** | 2× A10G，batch=32，seq_len=512 |
-| 验证集评测（每 epoch 结束） | 5000 条样本 | ~8 min/次 | NDCG@10 + Precision@3 |
-| 全流程总计（数据处理 → 最终 checkpoint） | — | **~10~11 h** | 含离线打分、训练、评测 |
+| 阶段                                     | 数据量                      | 耗时           | 备注                           |
+| -------------------------------------- | ------------------------ | ------------ | ---------------------------- |
+| 数据预处理（tokenization + 本地缓存）             | 48 万条 query，每条 1 正 + 5 负 | ~1.5 h       | 32 核 CPU 多进程并行               |
+| 离线 Reranker 打分（用于 Embedding 蒸馏阶段生成软标签） | 同上                       | ~3 h         | 仅推理，无梯度，单卡 A10G              |
+| **Reranker 全量 SFT（3 epoch）**           | ~280 万 query-doc pair    | **~5 h**     | 2× A10G，batch=32，seq_len=512 |
+| 验证集评测（每 epoch 结束）                      | 5000 条样本                 | ~8 min/次     | NDCG@10 + Precision@3        |
+| 全流程总计（数据处理 → 最终 checkpoint）            | —                        | **~10~11 h** | 含离线打分、训练、评测                  |
 
 **训练稳定性关键配置：**
 
@@ -325,14 +325,20 @@ calibrated_score = calibrator.predict_proba(raw_score)[:, 1]
 
 #### 3.4.5 训练超参数
 
-| 超参数 | 推荐值 | 选择依据 |
-|--------|--------|----------|
-| batch_size | 32~64（每个包含 1 正 + 5 负） | 受序列长度限制（query+doc 最长 512 token） |
-| learning_rate | 5e-6~2e-5 | Reranker 比 Embedding 更难训练，LR 要更小 |
-| max_seq_length | 512 | query + doc 拼接后的总长度 |
-| num_epochs | 3~5 | 结合早停，在验证集 NDCG@10 上评估 |
-| warmup_ratio | 0.1 | 同 Embedding |
-| label_smoothing | 0.1 | 避免模型对正样本过度置信，提升泛化 |
+| 超参数             | 推荐值                   | 选择依据                             |
+| --------------- | --------------------- | -------------------------------- |
+| batch_size      | 按实际序列长度与显存确定（每个包含 1 正 + 5 负） | 长序列需减小 batch；32~64 仅作短序列候选值 |
+| learning_rate   | 5e-6~2e-5             | Reranker 比 Embedding 更难训练，LR 要更小 |
+| max_seq_length  | 不额外设 512/1024 上限；以模型有效输入上限兜底 | query + doc + 特殊 token 的总长度；本基座支持至 8192 token |
+| num_epochs      | 3~5                   | 结合早停，在验证集 NDCG@10 上评估            |
+| warmup_ratio    | 0.1                   | 同 Embedding                      |
+| label_smoothing | 0.1                   | 避免模型对正样本过度置信，提升泛化                |
+
+**长度策略（建议）**：在模型有效输入上限内，保留完整的 query 和文档，不因固定的 512/1024 阈值提前截断。这里的“不额外限制”不等于无限长度：[本章列出的 `Alibaba-NLP/gte-multilingual-reranker-base`](https://huggingface.co/Alibaba-NLP/gte-multilingual-reranker-base) 官方支持最大 8192 token，换用其他模型时需重新确认。长度使用 Reranker 自身的 tokenizer 计算，并包含特殊 token；不能直接沿用 Embedding 的长度统计。
+
+批内采用动态 padding，按实际长度分桶并调整 batch size，不将所有样本补齐至 8192。超过模型上限的样本仍需分块或窗口处理，并重新确认每个输入片段的相关性标签，避免保留正样本标签却截掉答案证据。训练与推理应采用一致的长度和超长处理规则。
+
+上述为建议策略；现有示例训练脚本仍默认 512，前文 `seq_len=512` 的耗时记录也不能直接套用于长序列训练。
 
 #### 3.4.6 LLM-as-Reranker 的新趋势
 
