@@ -111,7 +111,7 @@ $$
 
 ### 4.3 专家容量（Expert Capacity）
 
-在批处理场景中，每个专家能处理的 token 数量是有上限的（**容量因子 Capacity Factor**）。若某专家超出容量，多余的 token 会被**丢弃（token drop）**或路由到次优专家。
+在批处理场景中，每个专家能处理的 token 数量是有上限的（**容量因子 Capacity Factor**）。若某专家超出容量，多余的 token 会被**丢弃（token drop）或路由到次优专家**。
 
 $$
 \text{Capacity} = \text{Capacity Factor} \times \frac{\text{Total Tokens}}{\text{Number of Experts}}

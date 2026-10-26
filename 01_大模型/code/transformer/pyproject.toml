@@ -1,0 +1,20 @@
+[project]
+name = "transformer-practice"
+version = "0.1.0"
+description = "带中文注释、张量追踪与复制任务的 Transformer 教学实践"
+requires-python = ">=3.12"
+dependencies = ["torch>=2.2"]
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
