@@ -3,7 +3,10 @@ name = "transformer-practice"
 version = "0.1.0"
 description = "带中文注释、张量追踪与复制任务的 Transformer 教学实践"
 requires-python = ">=3.12"
-dependencies = ["torch>=2.2"]
+dependencies = [
+    "numpy>=2.5.4",
+    "torch>=2.2",
+]
 
 [dependency-groups]
 dev = ["pytest>=8", "ruff>=0.8"]
