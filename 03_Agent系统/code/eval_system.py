@@ -1,4 +1,7 @@
-"""
+"""【学习定位：历史指标实验室】
+make_mock_*与部分Judge分数属于指标演算，不是新版完整任务成绩；新版完整episode从task_evaluation开始。
+对应07；理解指标公式后再看task_grading如何核验实际证据。
+
 eval_system.py — Agent 评测体系完整实现
 
 对应笔记：03_Agent评测体系设计.md

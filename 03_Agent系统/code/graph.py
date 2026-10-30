@@ -1,4 +1,7 @@
-"""
+"""【学习定位：旧版ReAct图】
+本图围绕一次工具链演示消息、条件边和人工中断；新版多轮调查图是task_workflow.py。
+对应02、03、06；消息reducer按消息ID合并，不是无条件追加字符串。
+
 graph.py — LangGraph 状态机装配
 
 LangGraph 核心概念
@@ -6,7 +9,7 @@ LangGraph 核心概念
 StateGraph：
     以 TypedDict（AgentState）为"黑板"，图中每个节点读写同一份 State，
     节点函数签名为 (state) -> dict，返回值会被 merge 进全局 State。
-    messages 字段使用 Annotated[list, add_messages]，LangGraph 自动追加而非覆盖。
+    messages 字段使用 Annotated[list, add_messages]，LangGraph 按消息ID合并，同ID可以更新。
 
 add_node / add_edge / add_conditional_edges：
     add_node(name, fn)          注册节点
@@ -99,6 +102,7 @@ def after_result_judge(state: AgentState) -> str:
 
 def _build_workflow(*, llm_factory=None, tool_map=None) -> StateGraph:
     # StateGraph(AgentState)：以 AgentState 作为整张图共享的状态结构
+    # 图定义决定节点关系，节点函数决定业务行为；compile后运行时再接收某个thread的状态。
     workflow = StateGraph(AgentState)
 
     # 注册节点：每个节点是一个普通 Python 函数 (state: AgentState) -> dict
@@ -148,12 +152,12 @@ def _build_workflow(*, llm_factory=None, tool_map=None) -> StateGraph:
 
 def create_graph_with_postgres():
     """
-    生产模式：PostgreSQL Checkpointer。
+    持久化教学模式：PostgreSQL Checkpointer。
 
     PostgresSaver.setup() 会在首次运行时自动建表（checkpoint / checkpoint_blobs 等）。
     hitl_node 内部的动态 interrupt 使图暂停：
       - LangGraph 将当前 State 序列化写入 Postgres
-      - 进程可以安全退出（释放 GPU/内存）
+      - 业务等待与模型服务分开；保存图状态不自动卸载远端模型
       - 人工审批后通过 graph.invoke(Command(resume={"approved": True}), config) 恢复
       - 调用方负责管理图和数据库连接的生命周期；此工厂适合常驻 CLI 演示
     """

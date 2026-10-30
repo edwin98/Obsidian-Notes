@@ -1,120 +1,75 @@
-# Agent 模型后训练：SFT + DPO 完整流水线
+# 新版训练代码怎样学与运行
 
-> [!note] 记录口径（2026-10-10 修订）
-> 文中包含设计方案、历史配置与效果数字。未关联数据集版本、运行 ID、checkpoint 或评测日志的数字需核实，不直接作为实测结论；本地示例代码与生产部署状态分别说明。
+先理解正文08，再按本页运行。默认日常Agent不会启动训练；训练数据必须先审核并按原问题分组。
 
-对应笔记：`03_Agent系统/08_Agent模型后训练SFT_DPO.md`
+## 1. 不加载模型的数学演练
 
----
+~~~powershell
+uv sync --extra training
+uv run python -X utf8 -m training.inspect_batch
+~~~
 
-## 流程总览
+objectives.py 展示 labels、因果位移、候选序列概率与固定参考；预期可看到约0.4581的SFT损失与0.4032的DPO损失。这是数学例子，不是任务成绩。
 
-```
-基座模型（Qwen3-32B）
-        │
-        ▼
-Step 1: 数据生成      generate_sft_data.py
-        Self-Instruct + Magpie → 合成 3.5 万条 SFT 对话
-        │
-        ▼
-Step 2: 数据清洗      clean_data.py
-        格式校验 + 质量过滤 + 去重 + 污染检测 + 分布校正
-        │
-        ▼
-Step 3: SFT 微调      train_sft.py + deepspeed_config.json
-        Qwen3-32B + LoRA（BF16 加载，无 4-bit 量化） (r=64) + DeepSpeed ZeRO-3
-        → Qwen3-32B-5G-SFT（格式合规率 71% → 97%）
-        │
-        ▼
-Step 4: 偏好数据准备  prepare_dpo_data.py
-        HITL 记录 → (prompt, chosen, rejected) 三元组
-        │
-        ▼
-Step 5: DPO 训练      train_dpo.py
-        β=0.1，SFT 模型作为 Reference
-        → Qwen3-32B-5G-Aligned（高危阻断率 72% → 97%）
-```
+## 2. 不下载权重的完整结构自检
 
----
+~~~powershell
+uv run python -X utf8 -m training.tiny_smoke
+~~~
 
-## 文件说明
+它创建极小随机Qwen结构和本地tokenizer，构造真实批次，CPU分别做一步SFT与DPO，再检查保存与合并。默认临时文件自动清理；--output-dir 指定一个新目录可保留查看。
 
-| 文件 | 作用 |
-|:---|:---|
-| `generate_sft_data.py` | Self-Instruct 指令扩增 + Magpie 对话生成 |
-| `clean_data.py` | 格式校验、质量过滤、去重、污染检测、分布校正 |
-| `train_sft.py` | Qwen3-32B LoRA（BF16 加载，无 4-bit 量化） SFT 训练主脚本 |
-| `prepare_dpo_data.py` | HITL 数据库 → DPO 三元组（或合成偏好数据） |
-| `train_dpo.py` | DPO 偏好对齐训练主脚本 |
-| `deepspeed_config.json` | DeepSpeed ZeRO-3 + CPU 卸载配置 |
+toy训练/验证材料只检查结构，不属于质量评测。不能把这一步的loss或偏好准确率当实际调查能力。
 
----
+## 3. 从专家审核导出数据
 
-## 快速开始
+TaskService.prepare_step 冻结输入；实验记录保留 context_snapshot_id。learning.export_decision_reviews 接收明确的 DecisionReview，目标是与部署一致的 PlanDecision。
 
-```bash
-# 安装依赖
-pip install transformers peft trl bitsandbytes datasets openai
-pip install deepspeed flash-attn --no-build-isolation  # 多卡训练
+新版SFT包含messages，DPO保留prompt角色列表及完整chosen/rejected。元数据包含source_group、reviewer、target_schema与快照引用。没有确认的记录不会导出。
 
-# Step 1: 生成 SFT 数据（需要 OpenAI API Key）
-python generate_sft_data.py
+## 4. 统一分组，再训练
 
-# Step 2: 清洗数据
-python clean_data.py
+~~~powershell
+python -X utf8 -m training.prepare_investigation_data --input-dir reviewed --output-dir prepared
+~~~
 
-# Step 3: SFT 训练（8 卡 A100）
-deepspeed --num_gpus=8 train_sft.py \
-  --deepspeed deepspeed_config.json \
-  --data_path data/sft_clean.jsonl \
-  --output_dir checkpoints/sft
+输出SFT/DPO的train、validation、test及groups.json。同一原问题、改写和修复跟进必须同组。哈希按80/10/10分配，独立问题少时某个集合可能为空；不能拿最终测试数据凑验证集。
 
-# Step 4: 准备 DPO 数据（演示用合成数据）
-python prepare_dpo_data.py --use_synthetic
+旧ExperimentPlan目标会规范成PlanDecision。训练入口要求显式独立验证集，不再次随机拆分。
 
-# Step 5: DPO 训练
-deepspeed --num_gpus=8 train_dpo.py \
-  --deepspeed deepspeed_config.json \
-  --sft_model_path checkpoints/sft/final \
-  --data_path data/dpo_clean.jsonl \
-  --output_dir checkpoints/dpo
-```
+## 5. 检查真实SFT批次
 
----
+以下命令需要已准备的数据；模型未缓存时会按所选模型加载权重。先用小模型和CPU学习，再按资源决定设备配置。
 
-## 关键超参数一览
+~~~powershell
+python -X utf8 -m training.train_sft --model_name_or_path Qwen/Qwen3-0.6B --data_path prepared/sft_train.jsonl --validation_path prepared/sft_validation.jsonl --output_dir checkpoints/sft-inspect --cpu --inspect-only
+~~~
 
-### SFT（train_sft.py）
+检查器打印整理器生成的实际张量形状、目标数量和首个目标解码。应主要看到助手计划，而不是用户消息或工具测量。模板不支持助手掩码时修模板，不静默退化成全文损失。
 
-| 超参数 | 值 | 原因 |
-|:---|:---|:---|
-| LoRA r | 64 | r=64 → 96.7% 格式合规率（历史记录 r=128 仅 +0.2%；适配器参数翻倍，总显存不一定翻倍，效果待日志核实） |
-| LoRA alpha | 128 | = 2×r，标准缩放因子 |
-| target_modules | q/v/o/gate/up proj | 覆盖注意力+MLP，不加 k_proj（扰乱位置编码） |
-| epochs | 3 | 第 3 Epoch 对难例上采样（×2），提升边界场景鲁棒性 |
-| lr | 5e-5 | Cosine 退火，warmup 5% |
-| batch size | 128（等效） | 2 × 8 accum × 8 GPU |
+## 6. SFT训练与DPO跟进
 
-### DPO（train_dpo.py）
+~~~powershell
+python -X utf8 -m training.train_sft --model_name_or_path Qwen/Qwen3-0.6B --data_path prepared/sft_train.jsonl --validation_path prepared/sft_validation.jsonl --output_dir checkpoints/sft --cpu --merge
+python -X utf8 -m training.train_dpo --sft_model_path checkpoints/sft/merged --data_path prepared/dpo_train.jsonl --validation_path prepared/dpo_validation.jsonl --output_dir checkpoints/dpo --cpu
+~~~
 
-| 超参数 | 值 | 原因 |
-|:---|:---|:---|
-| beta | 0.1 | KL 惩罚：太小→遗忘 SFT 能力，太大→DPO 效果微弱 |
-| loss_type | sigmoid | 标准 DPO |
-| lr | 1e-6 | 比 SFT 小 50 倍，防过拟合偏好数据 |
-| epochs | 2 | 偏好数据少（~1.2 万对），2 个 Epoch 足够 |
-| LoRA r | 32 | 比 SFT 更保守（对齐任务，非新能力学习） |
-| Reference Model | SFT 模型 | 防止 SFT 格式能力退化 |
+参数只是教学起点。硬件支持时可去掉--cpu并明确选择--bf16；分布式配置按实际环境提供。DPO显式加载独立冻结SFT参考，内存占用更高，但便于看清reference与policy。
 
----
+SFT足够就不做DPO。偏好对不足、候选同样合理或来源不明确时，先补数据，不自动把模型评审当专家真值。
 
-## 预期效果
+## 7. 输出分别代表什么
 
-| 指标 | 基座模型 | SFT 后 | DPO 后 |
-|:---|:---|:---|:---|
-| 格式合规率 | 71.3% | 96.7% | 96.1% |
-| 工具选择准确率 | 67.8% | 91.2% | — |
-| 任务完成率 | 52.1% | 83.6% | 88.0% |
-| **高危场景阻断率** | 38.7% | 72.4% | **96.8%** |
+- adapter/：适配器与tokenizer；需要对应基座。
+- merged/：只有显式--merge且单进程时输出完整模型。
+- checkpoint-*：训练器周期保存的恢复点，可含优化器等状态。
+- trainer_state.json：状态元数据，单独它并不等于完整优化器恢复点。
+- training_manifest.json：参数与输入文件哈希，帮助追溯。
 
-结合 `nodes.py` 中的 Guardrail 节点（关键词二次过滤），最终实现 **100% 高危场景阻断**。
+Windows请使用-X utf8，避免第三方模板默认GBK读取失败。真实训练中先固定依赖版本、核对目标位置并短试训，再通过完整Agent任务决定是否采用模型。
+
+## 8. 历史脚本与其他框架
+
+generate_sft_data.py、clean_data.py、prepare_dpo_data.py保留历史结论型数据参考；它们不直接承担新实验计划清洗。training_llamafactory 是可选转换路径，先分组再分别转换，保留来源元数据，不静默删掉工具消息。
+
+完整模块与调用关系见 [学习指南](../学习指南.md)。

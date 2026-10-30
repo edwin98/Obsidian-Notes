@@ -1,0 +1,36 @@
+{
+  "sft_5g": {
+    "file_name": "sft.json",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    }
+  },
+  "sft_5g_validation": {
+    "file_name": "sft_validation.json",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    }
+  },
+  "dpo_5g": {
+    "file_name": "dpo.json",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations",
+      "chosen": "chosen",
+      "rejected": "rejected"
+    },
+    "ranking": true
+  },
+  "dpo_5g_validation": {
+    "file_name": "dpo_validation.json",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations",
+      "chosen": "chosen",
+      "rejected": "rejected"
+    },
+    "ranking": true
+  }
+}

@@ -1,0 +1,12 @@
+/* 新版任务页样式；状态与实验数据由tasks.js读取后端记录。 */
+:root { font-family: system-ui, sans-serif; color: #172c34; background: #f5f6f3; }
+body { margin: 0; } main { max-width: 940px; margin: 40px auto; padding: 0 20px; }
+header { margin-bottom: 26px; } h1 { font-size: 30px; } h2 { font-size: 20px; }
+section { background: white; border: 1px solid #dce2dc; border-radius: 10px; padding: 22px; margin: 18px 0; }
+textarea { box-sizing: border-box; width: 100%; margin: 10px 0; padding: 12px; font: inherit; border: 1px solid #b1c0b8; border-radius: 6px; }
+button { padding: 9px 14px; border: 1px solid #a5b7ab; border-radius: 6px; background: #f4f8f4; color: inherit; cursor: pointer; }
+button:disabled { opacity: .5; cursor: wait; } #send { background: #235f46; color: white; }
+.actions, .examples { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; } .actions h2 { margin-right: auto; }
+.examples { margin-bottom: 18px; } article { border-top: 1px solid #dce2dc; padding: 12px 0; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; background: #f5f6f3; padding: 14px; border-radius: 6px; }
+.hint, header > p { color: #566c62; font-size: 14px; } #notice { color: #7b401b; } a { color: #235f46; }

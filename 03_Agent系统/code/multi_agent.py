@@ -1,4 +1,7 @@
-"""
+"""【学习定位：多局点并行的独立扩展示例】
+planning→map→worker→reduce演示子图与结果汇总，不代表新版默认把每组实验交给独立LLM。
+对应02、14；共享资源与证据归属必须在并行前确定。
+
 multi_agent.py — Multi-Agent Map-Reduce 全网验收架构
 
 对应全景报告第六章场景二：新局点 5G SA 全网验收跑批（Multi-Agent 自动驾驶模式）
@@ -194,6 +197,7 @@ def planning_node(state: OrchestratorState) -> dict:
 
 
 def map_node(state: OrchestratorState) -> list[Send]:
+    # Send表示对互不冲突的子任务并行分发，不表示所有共享设备任务都能安全并发。
     """
     Map 节点：使用 LangGraph Send API 将每个任务并发分发给独立 Worker。
 
@@ -265,6 +269,7 @@ def worker_node(state: WorkerState, *, worker_graph_factory=None) -> dict:
 
 
 def reduce_node(state: OrchestratorState) -> dict:
+    # 汇合时保留每个局点的有效性与缺项，不能用多数PASS掩盖一个未知或必测失败。
     """
     Reduce 节点：汇总所有 Worker 结果，生成最终验收报告。
 

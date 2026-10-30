@@ -1,15 +1,18 @@
-"""
+"""【学习定位：本地检索实验室】
+关键词、演示向量、加权RRF和演示重排依次产生候选。返回分数是相关性信号，不是事实正确概率。
+对应16；资料中的示例值不能代替项目确认规则。
+
 rag.py — 三级混合检索 RAG 模块
 
 对应全景报告第五章 5.1 节：RAG 赋能的 LLM 用例生成
 
 架构：
   BM25 (Elasticsearch) ──┐
-                          ├─► RSF 自适应融合 ──► Cross-Encoder Reranker ──► Top-K Context
+                          ├─► 加权 RRF 融合 ──► 演示重排器 ──► Top-K Context
   向量检索 (Milvus HNSW) ─┘
 
 关键设计：
-  1. RSF（Reciprocal Score Fusion）自适应调权：
+  1. 加权 RRF（Reciprocal Rank Fusion）按查询长度调整示例权重：
      短查询（词数 ≤ 5）偏向 BM25，长查询偏向向量检索，不是固定 50/50
   2. 检索前置增强：
      - 指代消解：将"它的切换成功率"解析为具体实体
@@ -18,8 +21,9 @@ rag.py — 三级混合检索 RAG 模块
   3. Cross-Encoder Reranker：
      对 BM25 + 向量的合并候选集做精排，动态阈值过滤噪声
 
-本文件为可独立运行的演示实现，所有"外部服务"（ES、Milvus、LLM）均以
-Mock 模拟，核心算法逻辑（RSF、Reranker、指代消解）完整实现。
+本文件为可独立运行的演示实现，外部服务以 Mock 模拟；向量与重排分数
+是教学近似，不代表真实 embedding 或 Cross-Encoder 的效果。rsf_* 字段名
+是旧接口兼容名，实际融合公式基于名次，属于 RRF，不是归一化原始分数相加。
 """
 
 from __future__ import annotations
@@ -274,14 +278,15 @@ def _query_word_count(query: str) -> int:
     return len(query.split())
 
 
-def rsf_fuse(
+def rrf_fuse(
     bm25_results: list[RetrievedDoc],
     vector_results: list[RetrievedDoc],
     query: str,
     k: int = 60,
 ) -> dict[str, float]:
+    # 两路原始相似度量纲不同；基于排名融合后再解释相关性，分数不是正确概率。
     """
-    RSF（Reciprocal Score Fusion）自适应融合。
+    加权 RRF：两路原始分数不直接相加，而用各自排名计算。
 
     核心思路：
       短查询（≤5词）→ 精确名词匹配为主 → bm25 权重 0.7
@@ -307,6 +312,10 @@ def rsf_fuse(
         fused[doc_id] = fused.get(doc_id, 0) + w_vector * (1.0 / (k + rank))
 
     return fused
+
+
+# 已有课程和测试可能导入旧名字，保留别名；新代码使用准确的算法名称。
+rsf_fuse = rrf_fuse
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -423,6 +432,7 @@ def expand_query(query: str) -> list[str]:
 
 
 def retrieve(query: str, top_k: int = 3) -> list[RankedDoc]:
+    # 先查询增强，再两路召回、排名融合和重排；这是教学近似，最终适用性仍需核对来源与版本。
     """
     完整 RAG 检索 Pipeline：
       1. 指代消解 + 多路扩展

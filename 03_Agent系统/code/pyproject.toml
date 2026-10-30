@@ -16,6 +16,15 @@ dependencies = [
 
 [project.optional-dependencies]
 postgres = ["langgraph-checkpoint-postgres>=3,<4", "psycopg[binary]>=3.3,<4"]
+# 固定到实际完成 CPU 训练演练的组合，方便学习时重现 Trainer 与批次行为。
+training = [
+    "torch==2.10.0",
+    "transformers==5.4.0",
+    "datasets==4.8.2",
+    "peft==0.18.1",
+    "trl==1.1.0",
+    "accelerate==1.13.0",
+]
 
 [dependency-groups]
 dev = ["pytest>=9,<10", "httpx>=0.28,<1", "ruff>=0.14,<1"]

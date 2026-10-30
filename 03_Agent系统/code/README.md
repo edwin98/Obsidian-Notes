@@ -1,89 +1,117 @@
-# 5G 测试 Agent：可执行教学实现
+# 测试与排查 Agent：可运行教学实现
 
-从 [学习指南](学习指南.md) 开始，按“运行观察 → 阅读源码 → 动手修改 → 测试验证 → 追踪评测”的路线提升 Agent 应用开发能力。指南包含源码入口、上手命令、练习和阶段成果。代码围绕 ReAct 工具调用、安全围栏与人工审批、离线专家反馈展开。
+默认使用新版统一入口。用户可以要求测试、复现异常、修改条件、查询、暂停、继续、取消，以及验证修复。脚本仍为确定性沙盒，不连接真实设备。
 
-## 快速运行
+## 按文档阅读整套代码
 
-在本目录执行（Python 3.12 或更新版本）：
+先看 [学习指南](学习指南.md)，再用 [代码文件索引](代码文件索引.md) 定位每个模块。新版主流程、旧图对照、评测和训练的边界都在指南中说明。
 
-```powershell
+新增的可观察入口：
+
+~~~powershell
+uv run python -X utf8 main.py --graph
+uv run python -X utf8 task_evaluation.py --output reports/evaluation.json
+uv run python -X utf8 -m training.inspect_batch
+uv run python -X utf8 -m training.tiny_smoke
+~~~
+
+前两项使用基础依赖；后两项需要可选 training 依赖。tiny_smoke 构造本地极小随机模型，CPU各做一步SFT和DPO，不下载模型，不代表真实质量。
+
+## 先跑一遍
+
+在本目录使用 Python 3.12 或更新版本：
+
+~~~powershell
 uv sync --group dev
-uv run python demo.py
-uv run python demo.py --scenario regression
-uv run python demo.py --scenario danger
-uv run python demo.py --scenario review
-uv run python offline_evaluation.py
-uv run pytest tests -q
-```
+uv run python main.py
+uv run python main.py --interactive
+uv run python main.py --query "验证新版本 A 到 B 的切换"
+uv run python main.py --db tasks.sqlite --interactive
+~~~
 
-这几条命令无需 API 密钥、GPU 或数据库。`danger` 和 `review` 会真正暂停，输入 `approve` 才继续，其余输入拒绝。离线模型是按规则请求工具的替身，用于理解工程流程。
+默认是离线规则替身，无需密钥或 GPU。main.py 默认示例会经历条件比较、简化和独立复核。不是直接打印一份预写结果，实际每组数据都会保存。
 
-## 可视化学习界面
+交互中可以依次输入：
 
-```powershell
-uv sync --group dev
+~~~text
+升级后移动视频卡顿，请在实验室查到能复现
+现在怎么样了
+这是修复版，按上次方法验证
+这是修复变慢版，按上次方法验证
+~~~
+
+new 开始新对话，exit 退出。取消和暂停最适合在页面的逐组模式或后台运行期间观察。
+
+## 打开界面
+
+~~~powershell
 uv run python demo.py --ui
-```
+~~~
 
-浏览器打开 <http://127.0.0.1:8000>。端口被占用时可加 `--port 8001`，并打开对应地址。
+浏览器打开 http://127.0.0.1:8000 。首页是新版任务界面，取消“自动跑到本轮结束”可逐组执行。页面显示参数、运行、证据与真实状态。
 
-- 选择正常通过、回归故障、危险请求或低置信度复核，无需配置 API 密钥。
-- 默认单步执行：点击“开始实验”完成意图澄清，此后每点一次“执行下一步”才运行一个节点。也可在开始前选择连续执行。
-- 点击执行轨迹，查看动作与观察、状态变化、输入快照和完整状态；界面解释本步为何走向下一个节点，并标明对应源码。
-- 危险请求与低置信度报告会真正等待人工决定。在页面填写反馈并批准或拒绝；普通“下一步”不能绕过审批。
-- 页面刷新后会回放当前任务的轨迹并保留断点；服务重启后，内存任务和断点失效。
+旧版 LangGraph 单步界面位于 /legacy。/demo/run、/run 等旧接口保留用于原教学与回归；新功能使用 /tasks/messages。
 
-建议先单步观察 `agent` 提出的 `tool_calls`，再经过 `guardrail`，最后对比 `tools` 返回的 `ToolMessage`。界面展示可观察的消息、证据和路由；离线替身不代表真实模型的规划能力。
+## 新版 API
 
-## 流程
+POST /tasks/messages 接收 message_id、conversation_id、text、可选 target_task_id、expected_task_version 和 auto_run。auto_run=false 只理解要求，之后用逐组接口推进。
 
-```text
-START → clarify → agent → guardrail → tools → agent
-            ↓        ↓        ↓
-          追问     result_judge  hitl（interrupt）
-                     ↓          ↓ Command(resume=审批决定)
-                   END/HITL    执行已审核工具 / 结束复核 / 拒绝终止
-```
+- GET /tasks/{task_id}：任务与状态。
+- POST /tasks/{task_id}/step：完成下一组实验，或评价是否结束。
+- GET /tasks/{task_id}/experiments：实验记录。
+- GET /tasks/{task_id}/events：已发生事件，返回 JSON。
+- GET /tasks/{task_id}/report：已有报告或只读阶段报告。
 
-审批只允许继续动作，不会提高模型置信度，也不意味着测试通过。
+暂停、继续、查询和取消仍通过统一消息入口表达。同一消息编号的重传不重复执行；同一编号换内容会返回冲突。
 
-## 文件导航
+接口未接生产认证，仅供本机单进程使用，不应直接暴露到网络。读接口不构成多租户隔离。
 
-| 文件 | 学习重点 |
-|---|---|
-| `state.py` | 状态、消息追加、独立初始化 |
-| `nodes.py` | 模型请求、工具观察、安全围栏、双轨判定 |
-| `graph.py` | 路由、断点、Checkpoint 与依赖注入 |
-| `tools.py` | 确定性沙盒、会话关联、参数校验 |
-| `demo.py` | 同一张图上的离线模型替身与节点轨迹 |
-| `rag.py` | 本地模拟检索、融合、精排及上下文引用 |
-| `multi_agent.py` | Send 分发、独立 Worker 图、汇总与签发门槛 |
-| `api.py` | HTTP、逐节点 SSE、审批与澄清续接 |
-| `web/`、`teaching.py` | 本地学习界面、状态快照对比与路由说明 |
-| `statistical.py` | 原始重复样本的 Welch/配对 t/KS 检验 |
-| `learning.py` | 专家确认数据导出 SFT/DPO |
-| `offline_evaluation.py` | 真实状态图上的固定场景工程回归 |
-| `evaluation.py` | 可选 LangSmith 在线评测 |
-| `eval_system.py` | 原有评测指标参考实现，部分入口使用模拟轨迹 |
-| `training/`、`training_llamafactory/` | 原有模型训练参考脚本，需要独立 GPU 环境验证 |
-| `tests/` | 节点、工具、状态图、API、检索、统计、反馈和多 Agent 测试 |
+## 保存和恢复
 
-## 在线模型与接口
+默认记录只在内存中。API 设置 AGENT_TASK_DB 为 SQLite 文件路径，CLI 使用 --db，即可保留任务与消息。
 
-复制 `.env.example` 为 `.env`，填写 `DEEPSEEK_API_KEY` 后运行 `uv run python main.py` 或 `uv run python main.py --interactive`。默认不启用 LangSmith 追踪。
+服务重新启动后，之前正在执行的任务会标记需人工核查，不会重新触发未知动作。真实平台恢复还需用实际 session_id 查询平台，本示例没有该连接。
 
-离线 API：
+## 使用在线模型
 
-```powershell
-$env:AGENT_MODE = "offline"
-$env:AGENT_SCENARIO = "danger"
-uv run uvicorn api:app --host 127.0.0.1 --port 8000
-```
+复制 .env.example 为 .env，配置 DEEPSEEK_API_KEY。
 
-打开 `http://127.0.0.1:8000/docs`，依次调用 `/run`、`/result/{task_id}`、`/resume/{task_id}`。`/stream/{task_id}` 提供 SSE；`/clarify/{task_id}` 追加澄清回答。
+~~~powershell
+uv run python main.py --online --interactive
+~~~
 
-PostgreSQL 演示需额外安装 `uv sync --group dev --extra postgres`，配置 `POSTGRES_URI` 后运行 `uv run python main.py --postgres`。
+API 则设置 AGENT_TASK_MODE=online。模型负责输出结构化意图与下一组计划，程序仍检查对象、条件、次数与证据。真实模型本轮未调用验证，所有执行工具仍为沙盒。
 
-## 验证边界
+旧单次测试图使用 main.py --legacy；--postgres 也仍走原图。新任务保存到 SQLite，不把两种保存方式混为一谈。
 
-本实现是可测试的教学系统。工具不会连接真实 5G 网元；向量检索和精排仍是本地近似。API 任务与事件位于单进程内存，重启即丢失。真实模型、PostgreSQL、外部检索服务和 GPU 训练需要各自的集成验证；本地测试结果不能替代这些验证。
+## 文件怎么读
+
+| 文件 | 内容 |
+| --- | --- |
+| task_models.py | 任务、计划、实验与运行记录 |
+| intent.py | 离线识别和在线模型识别 |
+| experiments.py | 计划选择、实际沙盒执行、数据与恢复 |
+| task_service.py、task_workflow.py | 统一消息，计划/提交/执行三个阶段，直接循环与LangGraph共用 |
+| task_store.py | SQLite、消息去重与历史 |
+| task_api.py、tasks_cli.py | HTTP 与命令行 |
+| web/tasks.* | 新统一界面 |
+| learning.py | 专家反馈与实验决策训练数据导出 |
+| task_evaluation.py、task_grading.py | 完整episode、独立事实核验、分项判分与轨迹导出 |
+| skill_library.py、skills/ | 按需读取排查方法，记录内容版本 |
+| graph.py、nodes.py、state.py、tools.py | 保留的旧单次测试图和工具示例 |
+| tests/ | 新旧工程回归 |
+| training/、training_llamafactory/ | 独立训练参考，不由日常任务自动启动 |
+
+## 检查
+
+~~~powershell
+uv run python -m ruff format .
+uv run python -m ruff check .
+uv run python -m pytest tests -q
+uv run python task_evaluation.py
+uv run python offline_evaluation.py
+~~~
+
+如本机已有虚拟环境，Windows 也可用 .venv/Scripts/python.exe 代替 uv run python。
+
+测试检查实际程序状态和沙盒返回，不是现场效果。真实模型、设备、数据库服务与训练需要另行验证。上手流程见 [学习指南](学习指南.md)，正文见 [项目导航](../README.md)。

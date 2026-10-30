@@ -1,4 +1,8 @@
-"""无需密钥的可执行教学轨迹，复用 graph.py，模型用规则替身。
+"""【学习定位：离线替身】
+OfflineModel复现消息式工具调用，不具备通用语言理解。它返回请求，由真实图节点执行工具。
+对应02、03；可逐节点观察Action与Observation。
+
+无需密钥的可执行教学轨迹，复用 graph.py，模型用规则替身。
 
 替身只负责按既定顺序请求工具，不代表真实 LLM 的规划能力或评测效果。
 运行：python demo.py --scenario regression；每一步会打印节点增量。
@@ -23,6 +27,11 @@ class OfflineModel:
         self.scenario, self.with_tools = scenario, with_tools
 
     def invoke(self, messages):
+        """从真实工具回包选下一动作；返回 tool_calls，工具执行留给图节点。
+
+        with_tools=False 用于澄清或结果模型的教学替身，固定值只方便
+        观察图路由，不代表模型质量或原因已经得到独立验证。
+        """
         if not self.with_tools:
             if "判断对话" in str(messages[0].content):
                 return AIMessage(content=json.dumps({"clear": True, "question": ""}))
@@ -93,6 +102,7 @@ class OfflineModel:
 
 
 def create_demo_graph(scenario="pass", *, step_mode=False):
+    """注入确定性依赖并编译原图；静态断点与动态人工审批分别观察。"""
     if scenario not in {"pass", "regression", "danger", "review"}:
         raise ValueError("未知离线场景")
     return create_graph_in_memory(

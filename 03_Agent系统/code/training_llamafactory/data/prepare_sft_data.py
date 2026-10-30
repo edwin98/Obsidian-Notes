@@ -1,4 +1,7 @@
-"""
+"""【学习定位：可选框架格式转换】
+转换已拆分的数据；保留来源元数据；不支持的工具角色显式报错，不能静默丢弃观测。
+对应08；默认不做上采样，转换不负责创造监督真值。
+
 prepare_sft_data.py — 将原始 SFT 数据转换为 LlamaFactory ShareGPT 格式
 
 输入格式（JSONL，每行一条）：
@@ -12,15 +15,11 @@ prepare_sft_data.py — 将原始 SFT 数据转换为 LlamaFactory ShareGPT 格�
                       {"from": "gpt",   "value": "..."}]}]
 
 核心处理：
-  放弃分阶段上采样，改为在数据准备阶段一次性对难例上采样（upweight=2.0），
-  训练时直接用这份数据跑完全部 3 个 Epoch。
-  难例类型（error_recovery、auth_bearer）来自文档 §5.3。
+  保留来源与角色；默认不改变样本分布。只有已拆分训练集才可显式上采样，
+  验证与最终测试不使用重复采样。工具交互暂不支持时明确报错，不丢弃。
 
 运行示例：
-  python data/prepare_sft_data.py \
-    --input  ../../training/data/sft_clean.jsonl \
-    --output data/sft_train.json \
-    --upweight 2.0
+  python data/prepare_sft_data.py     --input  ../../training/data/sft_clean.jsonl     --output data/sft_train.json     --upweight 2
 """
 
 import argparse
@@ -34,7 +33,7 @@ ROLE_MAP = {
     "assistant": "gpt",
 }
 
-# 文档 §5.3：这两类场景模型最容易做错，上采样强化
+# 历史示例类别；是否真的需要提高权重，取决于独立验证结果。
 HARD_SCENARIOS = {"error_recovery", "auth_bearer"}
 
 
@@ -44,9 +43,9 @@ def parse_args():
     parser.add_argument("--output", required=True, help="输出 JSON 路径")
     parser.add_argument(
         "--upweight",
-        type=float,
-        default=2.0,
-        help="难例上采样倍率（默认 2.0，即难例重复 2 次）",
+        type=int,
+        default=1,
+        help="显式选择的整数重复倍率；默认不改变分布，仅用于已拆分训练集",
     )
     parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
@@ -57,15 +56,17 @@ def to_sharegpt(sample: dict) -> dict:
     conversations = []
     for msg in sample["messages"]:
         role = ROLE_MAP.get(msg["role"])
-        if role is None:
-            continue
+        if role is None or msg.get("tool_calls"):
+            raise ValueError("此简化转换器不序列化工具交互，不能静默丢弃消息")
         conversations.append({"from": role, "value": msg["content"]})
-    return {"conversations": conversations}
+    return {"conversations": conversations, "metadata": sample.get("metadata", {})}
 
 
 def main():
     args = parse_args()
-    random.seed(args.seed)
+    if args.upweight < 1:
+        raise ValueError("上采样倍率必须至少为1")
+    rng = random.Random(args.seed)
 
     raw: list[dict] = []
     with open(args.input, encoding="utf-8") as f:
@@ -80,7 +81,7 @@ def main():
     # 难例重复 (upweight - 1) 份，总出现次数 = upweight 倍
     extra = hard * int(args.upweight - 1)
     all_samples = normal + hard + extra
-    random.shuffle(all_samples)
+    rng.shuffle(all_samples)
 
     output = [to_sharegpt(s) for s in all_samples]
 

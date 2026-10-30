@@ -1,4 +1,7 @@
-"""
+"""【学习定位：可选框架偏好格式转换】
+保留prompt中的历史助手轮次，chosen/rejected只存本次候选。先分组再分别转换各文件。
+对应08；格式转换不能破坏同输入或来源隔离。
+
 prepare_dpo_data.py — 将原始 DPO 偏好数据转换为 LlamaFactory ShareGPT 格式
 
 输入格式（JSONL，每行一条）：
@@ -20,9 +23,7 @@ prepare_dpo_data.py — 将原始 DPO 偏好数据转换为 LlamaFactory ShareGP
   ]
 
 运行示例：
-  python data/prepare_dpo_data.py \
-    --input  ../../training/data/dpo_clean.jsonl \
-    --output data/dpo_train.json
+  python data/prepare_dpo_data.py     --input  ../../training/data/dpo_clean.jsonl     --output data/dpo_train.json
 """
 
 import argparse
@@ -54,9 +55,14 @@ def convert_sample(sample: dict) -> dict | None:
     else:
         conversations = []
         for msg in prompt:
+            if msg.get("tool_calls"):
+                raise ValueError("简化转换器不支持结构化工具调用，不能静默丢失调用参数")
             role = ROLE_MAP.get(msg.get("role", ""))
-            if role and role != "gpt":  # DPO prompt 中不含 assistant 轮
+            if role:
+                # 多轮上下文里的历史助手消息不能丢；候选回复才放chosen/rejected。
                 conversations.append({"from": role, "value": msg["content"]})
+            else:
+                raise ValueError("该转换器不支持此角色；不能静默丢弃工具消息")
 
     if not conversations:
         return None
@@ -65,6 +71,7 @@ def convert_sample(sample: dict) -> dict | None:
         "conversations": conversations,
         "chosen": {"from": "gpt", "value": chosen},
         "rejected": {"from": "gpt", "value": rejected},
+        "metadata": sample.get("metadata", {}),
     }
 
 

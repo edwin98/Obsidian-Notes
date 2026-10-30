@@ -1,4 +1,7 @@
-"""
+"""【学习定位：历史结论型数据清洗】
+仍面向旧的verdict/confidence文本与场景分布，不能直接清洗新版实验决策。新版使用prepare_investigation_data。
+对应08；历史固定比例是示例，不是新系统默认配置。
+
 clean_data.py — SFT/DPO 数据清洗与质量过滤
 
 负责对 generate_sft_data.py 和 prepare_dpo_data.py 输出的原始数据进行：
@@ -426,7 +429,7 @@ def clean_sft_data():
         try:
             sample = SFTSample(**raw)
             valid_samples.append(raw)  # 保留原始 dict 而非 Pydantic 对象
-        except ValidationError as e:
+        except ValidationError:
             format_error_count += 1
 
     filter_rate = format_error_count / len(raw_samples) * 100
@@ -470,10 +473,10 @@ def clean_sft_data():
         print(f"[4.5] 数据污染检测（评测集 {len(eval_samples)} 条）...")
         deduped = check_data_contamination(deduped, eval_samples)
     else:
-        print(f"[4.5] 评测集文件不存在，跳过污染检测")
+        print("[4.5] 评测集文件不存在，跳过污染检测")
 
     # Step 5：场景分布校正
-    print(f"[5/5] 场景分布校正...")
+    print("[5/5] 场景分布校正...")
     final_samples = rebalance_by_scenario(deduped, SCENARIO_DISTRIBUTION_TARGET)
 
     # 统计最终分布
@@ -487,7 +490,7 @@ def clean_sft_data():
             f.write(json.dumps(sample, ensure_ascii=False) + "\n")
 
     print(f"\n[完成] SFT 清洗数据: {len(final_samples)} 条 → {OUTPUT_SFT_FILE}")
-    print(f"[提示] 下一步运行 train_sft.py 开始 QLoRA 微调")
+    print("[提示] 下一步运行 train_sft.py 开始 QLoRA 微调")
 
 
 def clean_dpo_data():
@@ -514,7 +517,7 @@ def clean_dpo_data():
         try:
             DPOSample(**raw)
             valid_samples.append(raw)
-        except ValidationError as e:
+        except ValidationError:
             pass  # DPO 数据格式错误通常意味着 HITL 数据提取有问题
 
     print(f"[2/3] 格式校验: 剩余 {len(valid_samples)} 条")
@@ -538,7 +541,7 @@ def clean_dpo_data():
             f.write(json.dumps(sample, ensure_ascii=False) + "\n")
 
     print(f"\n[完成] DPO 清洗数据: {len(filtered)} 条 → {OUTPUT_DPO_FILE}")
-    print(f"[提示] 下一步运行 train_dpo.py 开始 DPO 偏好对齐训练")
+    print("[提示] 下一步运行 train_dpo.py 开始 DPO 偏好对齐训练")
 
 
 if __name__ == "__main__":

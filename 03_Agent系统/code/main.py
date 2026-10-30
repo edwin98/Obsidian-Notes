@@ -1,18 +1,21 @@
-"""
-5G Test Verification Agent — CLI entry point.
+"""【学习定位：命令行总入口】
+默认新版任务服务；--graph显示新版节点；--legacy显示旧单次图；--eval是可选远程评测。
+先从run_tasks进入，再按学习指南定位业务模块。
+
+测试与排查助手 — 统一命令行入口，默认离线沙盒。
 
 Usage:
-  # 单次查询（非交互）
+  # 新版测试或调查（无需密钥）
   python main.py
-  python main.py --query "Test NAS authentication in roaming scenario"
+  python main.py --query "验证新版本的切换"
 
-  # 多轮对话交互模式（支持意图澄清）
+  # 新版多轮交互；--online 才使用在线模型
   python main.py --interactive
 
-  # 使用 PostgreSQL checkpointer
+  # --legacy 或 --postgres 保留旧图学习方式
   python main.py --interactive --postgres
 
-  # 运行 LangSmith 评测套件
+  # 可选旧 LangSmith 评测套件
   python main.py --eval
 """
 
@@ -25,7 +28,7 @@ from langgraph.types import Command
 
 from config import RECURSION_LIMIT
 
-DEFAULT_QUERY = "Run regression tests for 5G NR handover feature between gNB cells"
+DEFAULT_QUERY = "请在实验室复现升级后移动视频卡顿"
 
 INITIAL_STATE = {
     "current_step": "start",
@@ -223,12 +226,34 @@ def main() -> None:
         "--interactive", "-i", action="store_true", help="多轮对话交互模式"
     )
     parser.add_argument("--eval", action="store_true", help="运行 LangSmith 评测套件")
+    parser.add_argument(
+        "--legacy", action="store_true", help="运行旧版单次测试图，用于学习对照"
+    )
+    parser.add_argument(
+        "--online", action="store_true", help="新版入口使用在线模型；工具仍为沙盒"
+    )
+    parser.add_argument(
+        "--db", default=":memory:", help="新版任务 SQLite 文件，默认只存内存"
+    )
+    parser.add_argument(
+        "--graph", action="store_true", help="用新版 LangGraph 展示计划、提交与执行节点"
+    )
     args = parser.parse_args()
 
     if args.eval:
         from evaluation import run_evaluation
 
         run_evaluation()
+    elif not args.legacy and not args.postgres:
+        from tasks_cli import run_tasks
+
+        run_tasks(
+            args.query,
+            interactive=args.interactive,
+            online=args.online,
+            db=args.db,
+            graph=args.graph,
+        )
     elif args.interactive:
         run_interactive(use_postgres=args.postgres)
     else:

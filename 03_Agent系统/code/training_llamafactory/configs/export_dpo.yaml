@@ -1,0 +1,9 @@
+# 单独的权重导出阶段；合并模型与adapter、恢复checkpoint是不同产物。
+model_name_or_path: checkpoints/sft/merged
+adapter_name_or_path: checkpoints/dpo
+template: qwen3
+finetuning_type: lora
+export_dir: checkpoints/dpo/merged
+export_size: 2
+export_dtype: bfloat16
+export_legacy_format: false

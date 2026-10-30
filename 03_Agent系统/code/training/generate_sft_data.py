@@ -1,4 +1,7 @@
-"""
+"""【学习定位：历史合成轨迹参考】
+用于学习生成、评审、过滤与JSONL落盘。合成内容必须审核，不将生成的工具观测当真实平台结果。
+对应08；新版优先从learning导出实际决策前快照。
+
 generate_sft_data.py — SFT 训练数据生成流水线
 
 目标：
@@ -514,7 +517,7 @@ async def main():
     print(
         f"[Step 3] 完成！原始 SFT 数据 {len(sft_samples)} 条，保存至 {OUTPUT_DIR / 'sft_raw.jsonl'}"
     )
-    print(f"\n[提示] 下一步运行 clean_data.py 对数据进行质量过滤和去重")
+    print("\n[提示] 下一步运行 clean_data.py 对数据进行质量过滤和去重")
 
 
 if __name__ == "__main__":

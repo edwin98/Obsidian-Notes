@@ -24,7 +24,11 @@ venv/
 
 # Data
 *.db
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
 *.json
+!03_Agent系统/code/training_llamafactory/data/dataset_info.json
 *.txt
 
 # Logs

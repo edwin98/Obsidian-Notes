@@ -1,4 +1,7 @@
-"""
+"""【学习定位：旧图结构的可视化】
+只显示节点和边，不执行测试，也不能从图形推断模型质量。
+对应02、14；新版可以查看task_workflow的get_graph().draw_mermaid()。
+
 visualize.py — Agent 流程图生成
 
 LangGraph 内置三种可视化方式，无需额外建模工具：

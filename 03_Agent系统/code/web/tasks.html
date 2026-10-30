@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+<!-- 新版页面的DOM骨架：交互在tasks.js，业务判定在后端。 -->
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Agent 运行实验室：测试与排查</title>
+  <link rel="stylesheet" href="/assets/tasks.css">
+</head>
+<body>
+<main>
+  <header><p>本机沙盒 · 不操作真实设备</p><h1>测试与排查助手</h1>
+    <p>直接说要测什么、遇到什么问题，或修改当前任务。</p></header>
+  <section>
+    <div class="examples">
+      <button data-example="验证新版本 A 到 B 的切换">普通测试</button>
+      <button data-example="升级后移动视频卡顿，请在实验室查到能复现">复现异常</button>
+      <button data-example="这是修复版，按上次方法验证">验证修复</button>
+    </div>
+    <label for="message">你的要求</label>
+    <textarea id="message" rows="3" placeholder="例如：先别跑了，给我已有结果"></textarea>
+    <div class="actions"><label><input id="auto" type="checkbox" checked> 自动跑到本轮结束</label>
+      <button id="send">发送</button><button id="new">新对话</button></div>
+    <p id="notice" role="status"></p>
+  </section>
+  <section><div class="actions"><h2>当前任务</h2><button id="refresh">刷新</button><button id="step">执行下一组</button></div>
+    <p id="identity">尚未创建任务</p><p id="state"></p><p id="question"></p>
+    <p class="hint">离线模式按规则选择实验，用来演示程序流程，不代表模型能力。旧版单步学习界面在 <a href="/legacy">这里</a>。</p>
+  </section>
+  <section><h2>实验记录</h2><div id="experiments"></div></section>
+  <section><h2>本轮报告</h2><pre id="report">暂无报告</pre>
+    <details id="previous" hidden><summary>上次报告</summary><pre id="previous-report"></pre></details>
+  </section>
+</main>
+<script src="/assets/tasks.js"></script>
+</body></html>

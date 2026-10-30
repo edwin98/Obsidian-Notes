@@ -1,5 +1,9 @@
 "use strict";
 
+// 旧版单次图的逐节点学习页面，入口为 /legacy。
+// SSE只接收后端进度；请求、审批、澄清分别调用HTTP接口。
+// 页面保存可回看的状态快照，不把历史快照重新提交为执行命令。
+
 const $ = (id) => document.getElementById(id);
 const pretty = (value) => JSON.stringify(value, null, 2) ?? "（无）";
 const titles = { clarify: "意图澄清", agent: "选择下一步", guardrail: "安全检查", tools: "执行工具", result_judge: "双轨判定", hitl: "人工审批", end: "结束" };

@@ -1,4 +1,8 @@
-"""图节点：读完整状态，返回增量；路由由 graph.py 负责。
+"""【学习定位：旧图的节点实现】
+模型调用、工具校验、工具执行与判定各司其职；节点返回增量，graph.py决定后续路线。
+对应03、04、06；先读agent_node与tool_node，再看guardrail与hitl。
+
+图节点：读完整状态，返回增量；路由由 graph.py 负责。
 
 学习时重点观察两类消息：AIMessage.tool_calls 是模型的请求，ToolMessage
 才是程序实际执行的观察结果。模型给出的文字和置信度都不能替代工具证据。
@@ -122,6 +126,7 @@ def clarify_node(state: AgentState, *, llm_factory=_get_llm):
 
 
 def agent_node(state: AgentState, *, llm_factory=_get_llm):
+    # 模型只提出调用或回答；下一步由路由与执行侧检查决定。
     """每轮把真实观察交还模型；最终响应无效时以低置信度请求复核。"""
     response = _invoke_with_retry(
         llm_factory(True), [SystemMessage(content=SYSTEM_PROMPT), *state["messages"]]
@@ -175,6 +180,7 @@ def _validate_dependencies(name, args, outputs):
 
 
 def tool_node(state: AgentState, *, tool_map=None):
+    # 调用ID用于消息配对；session_id用于业务数据依赖，两者不可混用。
     """执行模型请求，保证每个 call_id 都有对应的 ToolMessage。
 
     tool_outputs 用于快速查询最近结果；tool_history 保留全部调用及异常。
@@ -228,6 +234,7 @@ def tool_node(state: AgentState, *, tool_map=None):
 
 
 def hitl_node(state: AgentState):
+    # interrupt恢复会重执行节点；暂停前不做不可重复的设备动作。
     """真正暂停并保存断点，恢复值来自 Command(resume=...)。
 
     interrupt 恢复时会重新执行本节点，因此它之前不能执行工具或写训练数据。
@@ -287,6 +294,7 @@ def hitl_node(state: AgentState):
 
 
 def result_judge_node(state: AgentState, *, llm_factory=_get_llm):
+    # 先核对真实工具证据和明确规则，再允许模型组织解释，缺证据不能用置信度补齐。
     """双轨判定：确定性业务规则 + 模型语义归纳。
 
     当前聚合 KPI 只能做阈值比较。需要 t/KS 检验时，使用 statistical.py

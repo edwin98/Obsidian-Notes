@@ -1,4 +1,7 @@
-"""
+"""【学习定位：历史HITL与冷启动偏好参考】
+规则分数或模型评审不能自动成为专家真值；新版审核入口见learning.DecisionReview。
+对应08；同输入、同可见信息、候选差异有依据才能构成偏好对。
+
 prepare_dpo_data.py — 从 HITL 记录构建 DPO 偏好数据
 
 核心思想（笔记 §4.2）：
@@ -19,9 +22,7 @@ prepare_dpo_data.py — 从 HITL 记录构建 DPO 偏好数据
   4. 频段错误：受限/军用频段 vs 合法实验频段
 
 使用方式：
-  python prepare_dpo_data.py \
-    --hitl_db postgresql://user:pass@localhost/hitl_db \
-    --output_file data/dpo_raw.jsonl
+  python prepare_dpo_data.py     --hitl_db postgresql://user:pass@localhost/hitl_db     --output_file data/dpo_raw.jsonl
 
   若没有真实 HITL 数据库，使用 --use_synthetic 生成合成偏好数据（仅供学习）。
 """
@@ -31,7 +32,7 @@ import asyncio
 import json
 import random
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -695,7 +696,7 @@ def main():
 
     print(f"\n[完成] DPO 原始数据 {len(dpo_samples)} 条 → {output_path}")
     print(
-        f"[提示] 下一步运行 clean_data.py 进行数据清洗（过滤 chosen≈rejected 的弱信号样本）"
+        "[提示] 下一步运行 clean_data.py 进行数据清洗（过滤 chosen≈rejected 的弱信号样本）"
     )
 
 

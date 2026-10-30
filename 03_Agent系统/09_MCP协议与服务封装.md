@@ -1,148 +1,149 @@
 ---
-title: "MCP 协议与服务封装"
-updated: 2026-10-23
+title: "MCP 在这里负责什么"
+updated: 2026-10-30
+status: 学习设计：通俗说明与技术展开
 ---
 
-# MCP 协议与服务封装
+# MCP 在这里负责什么
 
-本页维护协议能力、传输与 API 封装。Function Calling 是模型表达调用意图的机制，Skill 提供过程指导，三者的职责分别见 [[03_Agent系统/03_Function-Calling与消息协议]]、[[03_Agent系统/10_Agent-Skills与渐进披露]]。
+假设已有一个接口，可以提交仿真测试。Agent 想使用它，需要知道接口做什么、需要哪些参数，以及结果从哪里拿。
 
-## 一句话理解
+可以直接由程序调用这个接口，也可以通过 MCP 接入。**MCP 主要解决工具怎样被发现和调用，不负责判断该查什么问题。**
 
-- **API**：软件接口合约，可由 HTTP、gRPC 等承载；是否有状态、是否携带上下文取决于接口设计。
-- **MCP**：规范工具、资源和提示词等能力的发现与交互。MCP 客户端发现能力并向模型提供工具描述，模型提出调用请求，由宿主/客户端执行；协议也支持无状态的 HTTP 实现。
+## 从一个现成接口看接入过程
 
-## 核心区别对比
+先把“运行仿真”整理成工具说明：接受什么用例和参数，支持哪些环境，开始前需要什么条件，提交后返回什么。
 
-| 维度 | 传统 API | MCP |
-|---|---|---|
-| 调用方 | 代码硬编码调用 | LLM/Agent 动态发现并调用 |
-| 能力发现 | 依赖文档/OpenAPI Spec（离线） | 运行时 `tools/list` 动态枚举 |
-| 协议 | HTTP REST / gRPC 等 | JSON-RPC 2.0；标准传输为 stdio 和 Streamable HTTP，旧 HTTP+SSE 已被替代 |
-| 上下文 | 可携带会话、资源等，由接口设计决定 | 规范资源和会话交互，但不自动理解业务上下文 |
-| 类型系统 | 可用 OpenAPI、Protobuf 等 | 工具参数通常采用 JSON Schema |
-| 错误反馈 | HTTP 状态及业务错误等 | 协议错误与工具执行错误，重试由客户端策略决定 |
-| 主要场景 | 服务间调用 | LLM ↔ 外部能力 |
+运行程序连接工具服务，读取这些说明，再把当前任务可以用的工具提供给模型。
 
-## MCP 的能力与传输版本
+模型选择“运行仿真”，给出参数。程序检查设备、权限、次数和计划，再通过工具服务调用真实平台。
 
-2025-11-25 规范增加或完善授权发现、增量权限申请、URL elicitation、sampling 工具调用及实验性 Tasks。Tasks 要明确标注实验性，不能仅凭规范有定义就推断所有客户端/服务器已经支持。[规范变更](https://modelcontextprotocol.io/specification/2025-11-25/changelog)
+平台返回真实任务编号，程序保存并继续查进度。模型看到的结果也来自这里，而不是自己编出的完成状态。
 
-当前传输包含 stdio 和 Streamable HTTP。旧 HTTP+SSE 使用双端点，属于历史兼容路线；Streamable HTTP 可以用同一 MCP endpoint 处理 POST/GET，并可使用 SSE，因此“新传输不用 SSE”和“MCP 必须两个端点”都不准确。还需区分协议版本协商、授权与 HTTP Origin 校验。[传输规范](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)
+## 谁负责什么
 
-使用旧 `sse` 接口的实现应按对应历史版本理解。
+模型决定想用哪个工具、怎样理解结果。
 
-## 把一个已有 API 封装成 MCP 的步骤
+Agent 的运行程序负责连接服务、提供工具、检查请求、保存记录和管理后续执行。
 
-### 1. 选择 MCP SDK
+工具服务负责把请求转换成真实平台操作。平台真正执行并返回状态。
 
-```bash
-# Python
-pip install mcp
+服务器地址、凭据和连接方式由程序配置，不由模型从聊天或日志里猜。
 
-# TypeScript/Node
-npm install @modelcontextprotocol/sdk
+## 不一定要把所有东西都改成 MCP
+
+原来的直接接口已经好用，就可以继续使用。MCP 更适合把分散能力用较一致的方式提供出来，方便工具发现和接入。
+
+采用以后，设备权限、任务记录、资源限制、取消和恢复仍然要由应用处理。工具能被发现，不表示当前用户和当前任务都有权使用。
+
+具体传输、SDK 和可选能力，等实施时固定版本再验证。本文只说明本系统怎样分工。
+
+## 接口包装时，最容易漏什么
+
+只包装成功路径是不够的。还要说明提交超时以后怎样查，重复提交怎样处理，取消是否真正生效，数据缺失怎样返回。
+
+长测试可以先返回平台任务编号，由后台继续查询状态和结果。用户能及时看到请求已收到，后面也能查看进度。是否用连接推送进度，由应用决定；业务重试仍然需要自己处理。
+
+输出除了数值，还要有对象、时间、单位、实际参数和日志位置。模型才能判断这份结果能不能回答当前问题。
+
+## 工具多了，怎样让模型找得到
+
+程序可以先按任务、设备、环境和权限筛选，再提供必要工具。需要更多能力时，允许查询目录并加载说明。
+
+当前只是在读报告，就没有必要把大量设备操作工具都放进上下文。但执行侧检查仍然要有，不能只靠“不告诉模型”限制操作。
+
+本项目的任务、实验、运行编号属于业务记录，不是 MCP 自带的统一字段。包装时明确怎样传递和关联即可。
+
+## 接通以后怎样验收
+
+除了成功调用，还测试参数错误、版本不支持、重复请求、提交超时、查询失败、取消、恢复和无权限访问。
+
+每个结果能追到真实平台记录。模拟接通与真实平台验证分别保存，不把前者当成后者。
+
+Function Calling 负责表达模型的调用请求，MCP 是一种接入办法，Skill 则提供怎样做事的说明。工具本身见 [工具设计](04_工具设计与完整调用示例.md)，方法说明见 [Skills](10_Agent-Skills与渐进披露.md)。
+
+## 技术展开：连接、发现、调用是三个步骤
+
+宿主是运行 Agent 的应用，MCP Client 是宿主内的协议连接端，Server 提供工具实现。模型不直接拿服务凭据连设备，仍由宿主处理工具请求。
+
+```text
+模型 ←模型接口→ Agent 宿主 ←MCP→ 工具服务 ←平台接口→ 仿真或设备平台
 ```
 
-### 2. 定义 Tool Schema（对应原 API 的参数）
+以下协议示例按 MCP 2025-11-25 版本说明基础概念，不声称它是所有宿主当前使用的版本。接入时固定 SDK 与协商版本。
 
-原 API：`GET /weather?city=Beijing&unit=celsius`
-
-MCP Tool 定义：
-```python
-from mcp.server import Server
-from mcp.types import Tool, TextContent
-import httpx
-
-app = Server("weather-mcp")
-
-@app.list_tools()
-async def list_tools():
-    return [
-        Tool(
-            name="get_weather",
-            description="获取指定城市的实时天气",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "city": {"type": "string", "description": "城市名"},
-                    "unit": {"type": "string", "enum": ["celsius", "fahrenheit"], "default": "celsius"}
-                },
-                "required": ["city"]
-            }
-        )
-    ]
-
-@app.call_tool()
-async def call_tool(name: str, arguments: dict):
-    if name == "get_weather":
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(
-                "https://api.weather.com/weather",
-                params=arguments
-            )
-        return [TextContent(type="text", text=resp.text)]
-```
-
-### 3. 启动 MCP Server
-
-以下基于 Python SDK 的低层 Server API，须与前面的 app 定义组合运行。[SDK](https://github.com/modelcontextprotocol/python-sdk)、[传输规范](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)。
-
-```python
-import asyncio
-from mcp.server.stdio import stdio_server
-
-
-async def main():
-    async with stdio_server() as (read_stream, write_stream):
-        await app.run(read_stream, write_stream, app.create_initialization_options())
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
-```
+连接后先进行初始化与能力协商，再发送初始化完成通知，然后发现和调用工具。查询工具清单可以表达为：
 
 ```json
-// claude_desktop_config.json 注册
+{"jsonrpc":"2.0","id":10,"method":"tools/list","params":{}}
+```
+
+工具服务返回 `name`、`description`、`inputSchema` 等定义。宿主再按任务范围筛选，将它们转换成模型接口接受的工具定义。MCP 的字段不必与模型 API 完全相同。
+
+模型选定工具后，宿主检查请求，再发送：
+
+```json
 {
-  "mcpServers": {
-    "weather": {
-      "command": "python",
-      "args": ["weather_mcp.py"]
+  "jsonrpc": "2.0",
+  "id": 11,
+  "method": "tools/call",
+  "params": {
+    "name": "submit_test_run",
+    "arguments": {
+      "run_id": "run-01",
+      "test_case_id": "TC-MOB-01",
+      "parameters": {"load": "high", "handovers": 2}
     }
   }
 }
 ```
 
-### 4. 封装要点总结
+示例参数为简写，完整约束见工具契约。服务返回示意：
 
-- **description 写清楚**：模型会结合描述、参数 Schema、对话和系统指令决定工具调用，描述不是唯一依据
-- **inputSchema 用 JSON Schema 严格描述**：模型参数仍需校验；是否严格约束取决于提供方与配置，枚举值用 `enum`，必填用 `required`
-- **错误要结构化返回**：不要抛异常，返回带 `isError: true` 的 Content，LLM 可据此重试
-- **一个 API ≈ 一个 Tool**：粒度对齐，避免一个 Tool 做太多事
-
----
-
-## 5G 项目是否引入 MCP 与 Skill
-
-当前文档记录的工具主要面向内部 5G 测试，若无跨团队、跨框架复用需求，可以继续使用本地工具抽象；是否已接入生产以 [[03_Agent系统/01_项目事实与实现状态]] 为准。
-
-### MCP 的引入条件与边界
-
-跨框架共享工具、接入 MCP 客户端或由独立团队维护工具服务时，标准协议具有价值。引入 MCP 本身不必然破坏安全架构；关键是服务端也验证身份、授权、资源范围及参数，避免绕过 Agent 侧 Guardrail 后直接执行高危动作。Agent 侧审批和执行侧校验可同时保留。
-
-### Skill 与复合工具的分工
-
-LangChain Tool 提供可执行函数与参数 Schema；文件式 Agent Skills 提供适用条件、过程指导、脚本和资源，二者不等价。固定高频动作可以封装为工作流或复合工具，再由 Skill 说明何时使用。
-
-```python
-# 复合工具/工作流示意，不把 Python 类本身称为文件式 Agent Skill。
-class HandoverValidationWorkflow:
-    def run(self, scenario: str, baseline_version: str) -> dict:
-        cases = test_case_query(scenario)
-        session = simulation_runner(cases)
-        logs = log_analyzer(session)
-        return baseline_comparator(logs, baseline_version)
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 11,
+  "result": {
+    "content": [{"type":"text","text":"测试已提交，仍需查询执行结果"}],
+    "structuredContent": {
+      "run_id": "run-01",
+      "session_id": "session-01",
+      "status": "queued"
+    },
+    "isError": false
+  }
+}
 ```
 
-完整封装仍需处理异步等待、参数校验和失败恢复。是否固化流程，由规划错误、复用频率与维护成本决定。Skill 的开放格式与加载方式见 [[03_Agent系统/10_Agent-Skills与渐进披露]]。
+若声明 `outputSchema`，`structuredContent` 要满足它，客户端还应校验。协议层的未知方法等错误，与工具执行返回的 `isError=true` 分开处理；工具失败不必都表现为连接失败。[MCP 工具规范](https://modelcontextprotocol.io/specification/2025-11-25/server/tools)
+
+## 三种编号不能混用
+
+上例 JSON-RPC 的 `id=11` 用来关联 MCP 请求与响应；模型侧还有本次工具请求的调用 ID；业务侧有 `task_id/experiment_id/run_id/session_id`。
+
+宿主维护它们的映射。网络重连后，协议请求编号可以变化，但同一次业务提交仍沿用 `run_id` 幂等键。MCP 的请求 ID 不自动提供业务幂等，也不能替代实验记录。
+
+## 包装已有平台 API 的步骤
+
+1. 先定义平台适配层：提交、按运行键查询、取结果、取消、恢复分别有哪些真实接口。
+2. 为每项模型可用能力编写输入输出 schema、执行前提和错误语义。提交类工具使用稳定的业务幂等键。
+3. Server 校验参数并调用适配层；凭据由服务环境提供，不出现在模型参数和日志里。
+4. 宿主发现工具、筛选范围并转换模型定义，执行前检查任务版本和预算。
+5. 完成长测试的异步状态衔接，把真实运行和证据写入任务记录，再反馈给模型。
+
+粒度按业务动作设计。一个底层 HTTP 请求不必对应一个 Tool；“准备并执行一段已登记测试”也可以作为复合工具，但要公开可检查的阶段、结果和恢复语义。
+
+## stdio 与 Streamable HTTP 如何选择
+
+stdio 适合宿主启动本地工具进程，通过标准输入输出交换协议消息。标准输出保留给协议，普通日志写标准错误。
+
+Streamable HTTP 适合独立工具服务。它可以使用 SSE，因此不能把“HTTP 传输”和“SSE”理解成互斥路线。远程接入还要处理连接、授权与来源检查，不能只配一个 URL 就认为完成了业务权限隔离。[MCP 传输规范](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)
+
+资源与提示词能力可分别用于提供配置说明、报告引用和方法模板。它们不替代业务状态机；协议可选扩展也要核对两端支持，不能据此假设所有长测试自动可恢复。
+
+## 新版中的合理使用范围
+
+学习第一版可以直接调用本地工具，先把调查闭环讲清。需要复用多个平台工具时，再把相同契约暴露为 MCP，不改变实验、运行和证据模型。
+
+验收时重点检查：发现到的定义是否真正进入模型上下文，错误参数是否被拒绝，超时是否重复动作，返回结果是否关联正确运行，以及取消后是否完成必要收尾。能连通只是第一步。
