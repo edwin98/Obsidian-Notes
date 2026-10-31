@@ -1,0 +1,28 @@
+[project]
+name = "agentic-sft-dpo"
+version = "0.1.0"
+description = "单卡可跑的 Agentic SFT + DPO 教学实践：GSM8K 计算器工具调用、LoRA、多轮轨迹 DPO"
+requires-python = ">=3.12"
+dependencies = [
+    "torch>=2.7",
+    "transformers>=4.56",
+    "peft>=0.17",
+    "datasets>=3.0",
+    "accelerate>=1.0",
+]
+
+# Windows / Linux 上从 PyTorch 官方 CUDA 12.8 源安装 GPU 版 torch（支持 30/40/50 系显卡）
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu128", marker = "sys_platform == 'win32' or sys_platform == 'linux'" }]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
