@@ -6,7 +6,6 @@ requires-python = ">=3.12"
 dependencies = [
     "langgraph>=1.1.2,<2",
     "langchain-openai>=1.1.11,<2",
-    "langsmith>=0.7.20,<1",
     "python-dotenv>=1,<2",
     "fastapi>=0.129,<1",
     "uvicorn>=0.41,<1",
@@ -15,7 +14,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-postgres = ["langgraph-checkpoint-postgres>=3,<4", "psycopg[binary]>=3.3,<4"]
 # 固定到实际完成 CPU 训练演练的组合，方便学习时重现 Trainer 与批次行为。
 training = [
     "torch==2.10.0",

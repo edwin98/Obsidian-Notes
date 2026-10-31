@@ -22,8 +22,8 @@ rag.py — 三级混合检索 RAG 模块
      对 BM25 + 向量的合并候选集做精排，动态阈值过滤噪声
 
 本文件为可独立运行的演示实现，外部服务以 Mock 模拟；向量与重排分数
-是教学近似，不代表真实 embedding 或 Cross-Encoder 的效果。rsf_* 字段名
-是旧接口兼容名，实际融合公式基于名次，属于 RRF，不是归一化原始分数相加。
+是教学近似，不代表真实 embedding 或 Cross-Encoder 的效果。
+融合公式基于名次，属于 RRF，不是归一化原始分数相加。
 """
 
 from __future__ import annotations
@@ -62,9 +62,9 @@ class RankedDoc:
     """Reranker 精排后的文档"""
 
     doc: Document
-    rsf_score: float  # RSF 融合后的分数
+    rrf_score: float  # RRF 融合后的分数
     rerank_score: float  # Cross-Encoder 精排分数
-    final_score: float  # rsf_score * rerank_weight
+    final_score: float  # rrf_score * rerank_weight
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -314,10 +314,6 @@ def rrf_fuse(
     return fused
 
 
-# 已有课程和测试可能导入旧名字，保留别名；新代码使用准确的算法名称。
-rsf_fuse = rrf_fuse
-
-
 # ═══════════════════════════════════════════════════════════════════
 # 第七部分：Cross-Encoder Reranker
 # ═══════════════════════════════════════════════════════════════════
@@ -340,7 +336,7 @@ def _cross_encoder_score(query: str, doc_content: str) -> float:
 def rerank(
     query: str,
     candidates: list[Document],
-    rsf_scores: dict[str, float],
+    rrf_scores: dict[str, float],
     threshold: float = 0.0,
 ) -> list[RankedDoc]:
     """
@@ -350,15 +346,15 @@ def rerank(
     """
     ranked = []
     for doc in candidates:
-        rsf_score = rsf_scores.get(doc.doc_id, 0.0)
-        if rsf_score < threshold:
+        rrf_score = rrf_scores.get(doc.doc_id, 0.0)
+        if rrf_score < threshold:
             continue
         ce_score = _cross_encoder_score(query, doc.content)
-        final_score = rsf_score * 0.4 + ce_score * 0.6
+        final_score = rrf_score * 0.4 + ce_score * 0.6
         ranked.append(
             RankedDoc(
                 doc=doc,
-                rsf_score=rsf_score,
+                rrf_score=rrf_score,
                 rerank_score=ce_score,
                 final_score=final_score,
             )
@@ -472,12 +468,12 @@ def retrieve(query: str, top_k: int = 3) -> list[RankedDoc]:
     bm25_dedup = dedup(all_bm25)
     vector_dedup = dedup(all_vector)
 
-    # Step 3: RSF 融合（使用主查询决定权重）
-    rsf_scores = rsf_fuse(bm25_dedup, vector_dedup, query=resolved_query)
+    # Step 3: RRF 融合（使用主查询决定权重）
+    rrf_scores = rrf_fuse(bm25_dedup, vector_dedup, query=resolved_query)
 
     # Step 4: Reranker 精排
     all_docs = {r.doc.doc_id: r.doc for r in bm25_dedup + vector_dedup}
-    ranked = rerank(resolved_query, list(all_docs.values()), rsf_scores)
+    ranked = rerank(resolved_query, list(all_docs.values()), rrf_scores)
 
     return ranked[:top_k]
 

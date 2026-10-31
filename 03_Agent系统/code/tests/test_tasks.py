@@ -1,4 +1,4 @@
-"""新版入口与调查的业务回归：实际执行沙盒，不预写最终结论。"""
+"""统一入口与调查的业务回归：实际执行沙盒，不预写最终结论。"""
 
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
@@ -312,7 +312,7 @@ def test_decision_export_uses_pre_execution_context_and_requires_expert(tmp_path
     assert result["dpo_count"] == 0
 
 
-def test_new_offline_evaluation_runs_real_service():
+def test_offline_evaluation_runs_task_service():
     from task_evaluation import run_task_evaluation
 
     assert run_task_evaluation()["all_passed"]

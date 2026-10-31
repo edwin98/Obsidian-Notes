@@ -2,7 +2,7 @@
 OfflinePlanner/ModelPlanner提出下一组；SandboxExecutor拥有隐藏故障规则；summary只计算已发生的数据。
 对应04、12、13；从choose到execute，再看build_planning_context。
 
-新版实验的沙盒执行与计划选择。隐藏故障规则只存在执行端。
+统一实验的沙盒执行与计划选择。隐藏故障规则只存在执行端。
 """
 
 from threading import RLock

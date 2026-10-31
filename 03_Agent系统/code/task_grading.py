@@ -4,8 +4,8 @@
 本文件只读 TaskRecord，不调用模型，也不启动测试。
 """
 
-from dataclasses import asdict, dataclass
 import math
+from dataclasses import asdict, dataclass
 
 from task_models import TaskRecord
 

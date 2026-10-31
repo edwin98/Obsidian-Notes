@@ -8,7 +8,7 @@ import pytest
 from experiments import SandboxExecutor
 from learning import DecisionReview, export_decision_reviews
 from task_grading import grade_task
-from task_models import ExperimentPlan, MessageRequest, PlanDecision
+from task_models import MessageRequest, PlanDecision
 from task_service import TaskService
 from task_workflow import run_task_workflow
 
@@ -93,7 +93,7 @@ def test_missing_monitor_does_not_become_successful_reproduction():
     assert not grading["goal_met"] and grading["invalid_run_rate"] == 1
 
 
-def test_new_training_target_matches_deployment_wrapper_and_preserves_roles(tmp_path):
+def test_training_target_matches_deployment_wrapper_and_preserves_roles(tmp_path):
     service = TaskService()
     task = service.run(create(service))
     event = next(e for e in task.events if e["event"] == "experiment_started")
@@ -161,21 +161,14 @@ def test_skill_path_cannot_escape_library():
         SkillLibrary().load("../../other")
 
 
-def test_old_plan_is_upgraded_to_the_deployed_training_schema():
+def test_training_only_accepts_the_deployed_decision_schema():
     from training.prepare_investigation_data import normalize_target
 
-    plan = ExperimentPlan(
-        question="当前条件是否出现异常",
-        conditions={},
-        reason="先保留当前条件",
-        kind="test",
-    )
-    normalized = normalize_target(plan.model_dump_json(), "ExperimentPlan")
-    decision = PlanDecision.model_validate_json(normalized)
-    assert decision.action == "EXPERIMENT" and decision.plan == plan
-    assert normalize_target(normalized, "PlanDecision") == normalized
-    with pytest.raises(ValueError, match="schema"):
-        normalize_target(normalized, "UnknownSchema")
+    target = PlanDecision(action="WAIT", explanation="等待日志").model_dump_json()
+    assert normalize_target(target, "PlanDecision") == target
+    for schema in (None, "ExperimentPlan", "report"):
+        with pytest.raises(ValueError, match="PlanDecision"):
+            normalize_target(target, schema)
 
 
 def test_bad_training_pair_does_not_write_partial_dataset(tmp_path):
@@ -213,32 +206,3 @@ def test_bad_training_pair_does_not_write_partial_dataset(tmp_path):
     with pytest.raises(ValueError, match="相同候选"):
         prepare(tmp_path, output)
     assert not output.exists()
-
-
-def test_optional_framework_conversion_keeps_history_and_source_group():
-    from training_llamafactory.data.prepare_dpo_data import convert_sample
-    from training_llamafactory.data.prepare_sft_data import to_sharegpt
-
-    history = [
-        {"role": "user", "content": "复现异常"},
-        {"role": "assistant", "content": "需要哪些日志"},
-        {"role": "user", "content": "已补充日志"},
-    ]
-    metadata = {"source_group": "issue-1"}
-    sft = to_sharegpt({"messages": history, "metadata": metadata})
-    dpo = convert_sample(
-        {
-            "prompt": history,
-            "chosen": "比较条件",
-            "rejected": "直接确认原因",
-            "metadata": metadata,
-        }
-    )
-    assert sft["conversations"] == dpo["conversations"]
-    assert [m["from"] for m in dpo["conversations"]] == ["human", "gpt", "human"]
-    assert dpo["metadata"] == metadata
-    unsupported = [{"role": "tool", "content": "平台观测"}]
-    with pytest.raises(ValueError, match="角色"):
-        convert_sample({"prompt": unsupported, "chosen": "A", "rejected": "B"})
-    with pytest.raises(ValueError, match="工具"):
-        to_sharegpt({"messages": unsupported})

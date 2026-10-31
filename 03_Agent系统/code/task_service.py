@@ -1,4 +1,4 @@
-"""【学习定位：新版业务协调核心】
+"""【学习定位：统一业务协调核心】
 message处理用户操作；prepare_step锁外规划；commit_step事务校验与登记；execute_step固定执行。
 对应14；跟踪task_version、plan_version、run_id即可理解并发与迟到结果。
 
@@ -11,11 +11,11 @@ from experiments import OfflinePlanner, SandboxExecutor, build_planning_context,
 from intent import OfflineIntent
 from task_models import (
     Conditions,
-    ExperimentRecord,
     ExecutionBatch,
-    PreparedStep,
+    ExperimentRecord,
     MessageRequest,
     PlanDecision,
+    PreparedStep,
     RunRecord,
     TaskRecord,
     identifier,

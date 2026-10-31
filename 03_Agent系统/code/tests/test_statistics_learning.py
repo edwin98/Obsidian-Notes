@@ -60,6 +60,7 @@ def test_expert_feedback_exports_only_confirmed_deduplicated_pairs(tmp_path):
     assert sft["messages"][-1]["content"] == dpo["chosen"] == "失败：丢包超限"
     assert dpo["rejected"] == "通过"
     assert sft["messages"][0]["role"] == "system"
+    assert dpo["prompt"] == sft["messages"][:-1]
     with pytest.raises(FileExistsError):
         export_reviews([confirmed], tmp_path)
 

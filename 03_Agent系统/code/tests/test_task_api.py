@@ -71,15 +71,29 @@ def test_unified_api_query_steps_report_and_message_conflict():
     asyncio.run(run())
 
 
-def test_root_is_unified_and_legacy_demo_remains_available():
+def test_ui_and_health_use_only_task_service():
     async def run():
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=api.app), base_url="http://test"
         ) as client:
             assert "测试与排查助手" in (await client.get("/")).text
-            assert "Agent 运行实验室" in (await client.get("/legacy")).text
+            assert (await client.get("/health")).json() == {
+                "status": "ok",
+                "active_tasks": 0,
+            }
             for name in ("tasks.js", "tasks.css"):
                 assert (await client.get("/assets/" + name)).status_code == 200
+            for path in (
+                "/legacy",
+                "/demo/config",
+                "/assets/app.js",
+                "/assets/index.html",
+            ):
+                assert (await client.get(path)).status_code == 404
+            for path in ("/run", "/demo/run"):
+                assert (
+                    await client.post(path, json={"query": "测试"})
+                ).status_code == 404
 
     asyncio.run(run())
 

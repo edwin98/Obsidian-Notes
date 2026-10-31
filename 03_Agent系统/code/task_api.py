@@ -1,8 +1,8 @@
-"""【学习定位：新版HTTP适配】
+"""【学习定位：统一HTTP适配】
 路由只接消息与读结果；后台驱动TaskService。查询和报告不触发新实验，进程内_worker不是分布式队列。
 对应11、14；服务装配、消息处理、调度、读取依次阅读。
 
-新版单机教学接口。无生产认证，仅建议绑定本机地址运行。
+统一单机教学接口。无生产认证，仅建议绑定本机地址运行。
 """
 
 import asyncio
@@ -10,6 +10,7 @@ import os
 
 from fastapi import APIRouter, HTTPException
 
+from config import DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL
 from task_models import MessageRequest
 from task_service import TaskService
 from task_store import ConflictError, TaskStore
@@ -27,7 +28,6 @@ def create_service(*, mode=None, path=None):
     if (mode or os.getenv("AGENT_TASK_MODE", "offline")) == "online":
         from langchain_openai import ChatOpenAI
 
-        from config import DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL
         from experiments import ModelPlanner
         from intent import ModelIntent
 
@@ -144,7 +144,7 @@ async def step(task_id: str):
 
 @router.get("/{task_id}/events")
 async def events(task_id: str):
-    """返回已落库事件列表；新版这里是 JSON 读取接口，不是旧版 SSE。"""
+    """返回已落库事件列表，使用 JSON 读取接口。"""
     return (await task(task_id))["events"]
 
 

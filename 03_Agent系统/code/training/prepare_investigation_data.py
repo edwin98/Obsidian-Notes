@@ -1,11 +1,11 @@
-"""【学习定位：新版数据准备】
+"""【学习定位：决策数据准备】
 统一验证SFT/DPO目标并按source_group哈希拆分，训练入口不得再次按行随机打散。
 对应08；相同故障及修复跟进属于同一组。
 
-验证新版决策数据，并按原始问题统一拆分 SFT/DPO，避免同源泄漏。
+验证决策数据，并按原始问题统一拆分 SFT/DPO，避免同源泄漏。
 
 从 code 目录运行 python -m training.prepare_investigation_data --input-dir ... --output-dir ...
-本脚本不调用模型，不启动训练，也不把旧结论型清洗规则用于实验计划。
+本脚本不调用模型，不启动训练。
 """
 
 import argparse
@@ -13,7 +13,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from task_models import ExperimentPlan, PlanDecision
+from task_models import PlanDecision
 
 
 def split_for_group(group: str, seed: str = "investigation-v1") -> str:
@@ -48,15 +48,10 @@ def read_training_splits(train_path: Path, validation_path: Path):
 
 
 def normalize_target(text: str, schema_name: str | None) -> str:
-    """旧内层计划显式升级为部署使用的PlanDecision，输出统一序列化格式。"""
-    if schema_name == "PlanDecision":
-        return PlanDecision.model_validate_json(text).model_dump_json()
-    if schema_name not in {None, "ExperimentPlan"}:
-        raise ValueError("不支持的训练目标schema")
-    plan = ExperimentPlan.model_validate_json(text)
-    return PlanDecision(
-        action="EXPERIMENT", plan=plan, explanation=plan.reason
-    ).model_dump_json()
+    """训练和部署只接受同一份 PlanDecision 契约。"""
+    if schema_name != "PlanDecision":
+        raise ValueError("训练目标 schema 必须为 PlanDecision")
+    return PlanDecision.model_validate_json(text).model_dump_json()
 
 
 def prepare(input_dir: Path, output_dir: Path, *, seed="investigation-v1"):

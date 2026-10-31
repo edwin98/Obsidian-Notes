@@ -1,8 +1,8 @@
-"""【学习定位：新版数据字典】
+"""【学习定位：统一数据字典】
 Conditions是完整条件，ConditionPatch是增量；Task关联Experiment、Run和Evidence。PlanDecision只是候选。
 对应01、03、05、14；编号和执行事实由程序生成。
 
-新版业务记录：任务、实验和实际运行分别保存，不以聊天代替执行事实。
+统一业务记录：任务、实验和实际运行分别保存，不以聊天代替执行事实。
 """
 
 from datetime import UTC, datetime
@@ -175,7 +175,7 @@ class TaskRecord(Record):
     investigate_on_failure: bool = False
     max_runs: int = 36
     max_experiments: int = 12
-    # 为兼容旧页面保留字段名；它表示已使用 + 尚未结算的预留次数。
+    # 累计额度占用：已使用 + 尚未结算的预留次数。
     # 已开始的运行不可因异常/暂停而免费重跑，未开始的预留才在收尾时释放。
     reserved_runs: int = 0
     experiments: list[ExperimentRecord] = Field(default_factory=list)

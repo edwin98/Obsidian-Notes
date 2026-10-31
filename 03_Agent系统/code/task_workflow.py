@@ -1,4 +1,4 @@
-"""新版调查图：把文档中的“计划、提交、执行”变成可观察节点。
+"""统一调查图：把文档中的“计划、提交、执行”变成可观察节点。
 
 阅读顺序：task_models → task_service.prepare_step/commit_step/execute_step → 本文件。
 图状态只放本轮引用与轻量计划，完整任务和证据仍从 TaskStore 读取。
@@ -53,15 +53,18 @@ def create_task_workflow(service):
     builder.add_node("read", read)
     builder.add_edge(START, "plan")
     builder.add_conditional_edges(
-        "plan", lambda state: "commit" if state["prepared"] else "read"
+        "plan",
+        lambda state: "commit" if state["prepared"] else "read",
+        {"commit": "commit", "read": "read"},
     )
     builder.add_conditional_edges(
-        "commit", lambda state: "execute" if state["batch"] else "read"
+        "commit",
+        lambda state: "execute" if state["batch"] else "read",
+        {"execute": "execute", "read": "read"},
     )
     builder.add_edge("execute", "read")
     builder.add_edge("read", END)
     # 本教学图每次从业务库重新加载，不叠加另一套持久化事实。
-    # 旧 graph.py 单独演示 checkpointer 与 interrupt，两者不是同一个图。
     return builder.compile()
 
 

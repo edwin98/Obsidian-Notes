@@ -79,11 +79,8 @@ def export_reviews(
         if review.original_answer != review.corrected_answer:
             dpo.append(
                 {
-                    # 新版保留角色边界，由目标模型的模板序列化。
-                    # 旧结论型样本保留历史格式，避免悄悄改变旧数据契约。
-                    "prompt": prompt
-                    if review.sample_type == "experiment_decision"
-                    else f"{system_prompt}\n\n用户：{review.query}\n助手：",
+                    # 保留角色边界，由目标模型的模板序列化。
+                    "prompt": prompt,
                     "chosen": review.corrected_answer,
                     "rejected": review.original_answer,
                     "metadata": metadata,
